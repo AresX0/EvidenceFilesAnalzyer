@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+.env
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQLite DB
+*.db
+
+# caches
+*.pkl
+
+# Build
+dist/
+build/
+
+# Sensitive or local data - DO NOT COMMIT
+faces_*
+gallery_*/
+reports/
+queue_state.json
+config.json
+file_analyzer.db
+
+# Editor
+.vscode/
+.idea/
