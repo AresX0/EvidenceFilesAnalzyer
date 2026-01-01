@@ -31,8 +31,26 @@ def test_run_gui_builds_widgets(monkeypatch, tmp_path):
     # should not raise and should create root in container
     run_gui(report_path=rpt_path)
     assert 'root' in container
+    root = container['root']
+    # ensure Notebook widget exists (All/Images/Documents)
+    # fallback: look for listboxes inside children (tabs contain listboxes)
+    def find_listboxes(root_widget):
+        cnt = 0
+        stack = [root_widget]
+        while stack:
+            w = stack.pop()
+            try:
+                if w.winfo_class() == 'Listbox':
+                    cnt += 1
+                stack.extend(w.winfo_children())
+            except Exception:
+                continue
+        return cnt
+
+    assert find_listboxes(root) >= 3, 'Notebook tabs not found in GUI (no listboxes found)'
+
     # clean up by destroying the window
     try:
-        container['root'].destroy()
+        root.destroy()
     except Exception:
         pass
