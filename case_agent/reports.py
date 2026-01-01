@@ -311,27 +311,54 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         fh.write(f"<li>Media without transcription: {len(issues.get('media_no_transcription', []))}</li>")
         fh.write('</ul>')
 
-        # People and file annotations with inline thumbnails and per-person pages
-        fh.write('<h2>People (annotated with files)</h2>')
-        fh.write('<table border="1"><tr><th>Person</th><th>File Count</th><th>Preview</th></tr>')
+        # People and file annotations separated into Images and Documents
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}
+        doc_exts = {'.pdf', '.txt', '.docx', '.doc'}
+
+        fh.write('<h2>People — Images</h2>')
+        fh.write('<table border="1"><tr><th>Person</th><th>Image Count</th><th>Preview</th></tr>')
         for person in report.get('people', []):
             name = person.get('person')
             safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
             person_page = f"people/{safe_name}.html"
-            # prepare thumbnails for first few files
+            # prepare thumbnails for first few image files
             thumbs_html = []
-            for fpath in person.get('files', [])[:8]:
-                try:
-                    tpath = thumbnail_for_image(fpath, reports_dir, size=(200, 150))
-                    rel = Path('thumbnails') / Path(tpath).name
-                    thumbs_html.append(f"<a href=\"{person_page}\"><img src=\"{rel.as_posix()}\" style=\"max-width:200px;margin:4px;\" /></a>")
-                except Exception:
-                    pass
-            fh.write('<tr>')
-            fh.write(f"<td><a href=\"{person_page}\">{name}</a></td>")
-            fh.write(f"<td>{person.get('file_count')}</td>")
-            fh.write(f"<td>{''.join(thumbs_html)}</td>")
-            fh.write('</tr>')
+            img_count = 0
+            for fpath in person.get('files', []):
+                if Path(fpath).suffix.lower() in image_exts:
+                    img_count += 1
+                    if len(thumbs_html) < 8:
+                        try:
+                            tpath = thumbnail_for_image(fpath, reports_dir, size=(200, 150))
+                            rel = Path('thumbnails') / Path(tpath).name
+                            thumbs_html.append(f"<a href=\"{person_page}\"><img src=\"{rel.as_posix()}\" style=\"max-width:200px;margin:4px;\" /></a>")
+                        except Exception:
+                            pass
+            if img_count > 0:
+                fh.write('<tr>')
+                fh.write(f"<td><a href=\"{person_page}\">{name}</a></td>")
+                fh.write(f"<td>{img_count}</td>")
+                fh.write(f"<td>{''.join(thumbs_html)}</td>")
+                fh.write('</tr>')
+        fh.write('</table>')
+
+        fh.write('<h2>People — Documents</h2>')
+        fh.write('<table border="1"><tr><th>Person</th><th>Document Count</th><th>Documents</th></tr>')
+        for person in report.get('people', []):
+            name = person.get('person')
+            safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
+            docs_html = []
+            doc_count = 0
+            for fpath in person.get('files', []):
+                if Path(fpath).suffix.lower() in doc_exts:
+                    doc_count += 1
+                    docs_html.append(f"<a href=\"file:///{Path(fpath).as_posix()}\">{Path(fpath).name}</a>")
+            if doc_count > 0:
+                fh.write('<tr>')
+                fh.write(f"<td><a href=\"{person_page}\">{name}</a></td>")
+                fh.write(f"<td>{doc_count}</td>")
+                fh.write(f"<td>{'<br/>'.join(docs_html)}</td>")
+                fh.write('</tr>')
         fh.write('</table>')
 
         # PDF synopses
@@ -347,7 +374,7 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
 
         fh.write('</body></html>')
 
-    # write per-person pages
+    # write per-person pages with pre-rendered overlay thumbnails when matches exist
     for person in report.get('people', []):
         name = person.get('person')
         safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
@@ -358,10 +385,39 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
             ph.write('<ul>')
             for fpath in person.get('files', []):
                 try:
+                    # create a thumbnail and overlay matches if present
                     tpath = thumbnail_for_image(fpath, reports_dir, size=(400, 300))
+                    overlay_path = None
+                    try:
+                        import sqlite3, json
+                        conn = sqlite3.connect(str(Path(reports_dir).parent / 'file_analyzer.db'))
+                        cur = conn.cursor()
+                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
+                        rows = cur.fetchall()
+                        conn.close()
+                        matches = []
+                        for r in rows:
+                            subj, pb = r[0], r[1]
+                            try:
+                                pbj = json.loads(pb) if pb else None
+                            except Exception:
+                                pbj = None
+                            matches.append({'subject': subj, 'probe_bbox': pbj})
+                        if matches:
+                            from .utils.image_overlay import overlay_matches_on_pil
+                            from PIL import Image
+                            img = Image.open(tpath).convert('RGB')
+                            img = overlay_matches_on_pil(img, matches, size=img.size)
+                            overlay_path = Path(reports_dir) / ('overlay_' + Path(tpath).name)
+                            img.save(overlay_path, format='JPEG', quality=85)
+                    except Exception:
+                        overlay_path = None
                     rel = Path('thumbnails') / Path(tpath).name
                     ph.write('<li>')
-                    ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{rel.as_posix()}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
+                    if overlay_path:
+                        ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{Path('thumbnails') / overlay_path.name}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
+                    else:
+                        ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{rel.as_posix()}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
                     ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\">{fpath}</a>")
                     ph.write('</li>')
                 except Exception:

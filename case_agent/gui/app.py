@@ -75,11 +75,33 @@ def run_gui(report_path=REPORT):
     type_filter_entry.pack(fill='x', pady=(4,6))
     type_filter_entry.insert(0, 'Filter by extension (e.g. .jpg)')
 
-    lb = tk.Listbox(left)
-    lb.pack(fill='both', expand=True)
+    # Notebook with tabs for All / Images / Documents
+    notebook = ttk.Notebook(left)
+    tab_all = ttk.Frame(notebook)
+    tab_images = ttk.Frame(notebook)
+    tab_docs = ttk.Frame(notebook)
+    notebook.add(tab_all, text='All')
+    notebook.add(tab_images, text='Images')
+    notebook.add(tab_docs, text='Documents')
+    notebook.pack(fill='both', expand=True)
+
+    lb_all = tk.Listbox(tab_all)
+    lb_all.pack(fill='both', expand=True)
+    lb_images = tk.Listbox(tab_images)
+    lb_images.pack(fill='both', expand=True)
+    lb_docs = tk.Listbox(tab_docs)
+    lb_docs.pack(fill='both', expand=True)
 
     # Keep a working list of people that matches current filters
     _filtered_people = list(people)
+    _filtered_images = []
+    _filtered_docs = []
+
+    def _person_has_ext(person, ext_set):
+        for f in person.get('files', []):
+            if Path(f).suffix.lower() in ext_set:
+                return True
+        return False
 
     def refresh_people_list():
         q = search_var.get().lower()
@@ -87,6 +109,10 @@ def run_gui(report_path=REPORT):
         sort = sort_var.get()
         # filter
         out = []
+        out_images = []
+        out_docs = []
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}
+        doc_exts = {'.pdf', '.txt', '.docx', '.doc'}
         for p in people:
             name = p.get('person', '')
             files = p.get('files', [])
@@ -102,18 +128,42 @@ def run_gui(report_path=REPORT):
                 if not ok:
                     continue
             out.append(p)
+            if _person_has_ext(p, image_exts):
+                out_images.append(p)
+            if _person_has_ext(p, doc_exts):
+                out_docs.append(p)
         # sort
         if sort == 'Files (desc)':
             out.sort(key=lambda x: x.get('file_count', 0), reverse=True)
+            out_images.sort(key=lambda x: x.get('file_count', 0), reverse=True)
+            out_docs.sort(key=lambda x: x.get('file_count', 0), reverse=True)
         else:
             out.sort(key=lambda x: x.get('person', '').lower())
-        # update listbox
-        lb.delete(0, 'end')
+            out_images.sort(key=lambda x: x.get('person', '').lower())
+            out_docs.sort(key=lambda x: x.get('person', '').lower())
+        # update listboxes
+        lb_all.delete(0, 'end')
+        lb_images.delete(0, 'end')
+        lb_docs.delete(0, 'end')
         for p in out:
-            lb.insert('end', f"{p.get('person')} ({p.get('file_count')})")
+            lb_all.insert('end', f"{p.get('person')} ({p.get('file_count')})")
+        for p in out_images:
+            lb_images.insert('end', f"{p.get('person')} ({p.get('file_count')})")
+        for p in out_docs:
+            lb_docs.insert('end', f"{p.get('person')} ({p.get('file_count')})")
         # store filtered
-        nonlocal _filtered_people
+        nonlocal _filtered_people, _filtered_images, _filtered_docs
         _filtered_people = out
+        _filtered_images = out_images
+        _filtered_docs = out_docs
+
+    # Debounce logic for search to improve performance
+    _search_after_id = None
+    def do_search_debounced(evt=None):
+        nonlocal _search_after_id
+        if _search_after_id:
+            root.after_cancel(_search_after_id)
+        _search_after_id = root.after(200, refresh_people_list)
 
     # initial population
     refresh_people_list()
@@ -129,6 +179,54 @@ def run_gui(report_path=REPORT):
     matches_lb = tk.Listbox(top_frame, height=6)
     matches_lb.pack(side='left', fill='y')
 
+    # Documents list for selected person (double-click to open)
+    docs_label = ttk.Label(top_frame, text='Documents')
+    docs_label.pack(side='left', padx=(10,0))
+    docs_lb = tk.Listbox(top_frame, height=6)
+    docs_lb.pack(side='left', fill='y')
+
+    # Alfred chat / voice input frame
+    chat_frame = ttk.Frame(right)
+    chat_frame.pack(fill='x')
+    chat_label = ttk.Label(chat_frame, text='Alfred:')
+    chat_label.pack(side='left')
+    chat_entry = ttk.Entry(chat_frame)
+    chat_entry.pack(side='left', fill='x', expand=True, padx=(4,4))
+    chat_btn = ttk.Button(chat_frame, text='Ask', command=lambda: handle_alfred_query(chat_entry.get()))
+    chat_btn.pack(side='left')
+    mic_btn = ttk.Button(chat_frame, text='Mic', state='disabled')
+    mic_btn.pack(side='left', padx=(4,0))
+
+    # Try to enable mic button if speech_recognition available and microphone present
+    try:
+        import speech_recognition as sr
+        # naive check for mic devices
+        r = sr.Recognizer()
+        mics = sr.Microphone.list_microphone_names()
+        if mics:
+            mic_btn.config(state='normal')
+            def on_mic_click():
+                # run recognition in background
+                def _listen():
+                    with sr.Microphone() as source:
+                        r.adjust_for_ambient_noise(source)
+                        audio = r.listen(source, timeout=5)
+                        try:
+                            txt = r.recognize_sphinx(audio)
+                        except Exception:
+                            try:
+                                txt = r.recognize_google(audio)
+                            except Exception:
+                                txt = ''
+                        if txt:
+                            chat_entry.delete(0, 'end')
+                            chat_entry.insert(0, txt)
+                            handle_alfred_query(txt)
+                import threading
+                threading.Thread(target=_listen, daemon=True).start()
+            mic_btn.config(command=on_mic_click)
+    except Exception:
+        pass
     # Thumbnail gallery area with a canvas + scrollbar
     gallery_frame = ttk.Frame(right)
     gallery_frame.pack(fill='both', expand=True)
@@ -166,22 +264,46 @@ def run_gui(report_path=REPORT):
             matches_lb.insert('end', f"{r[0]} ({r[1]})")
 
     # Thumbs: use thumbnail util to generate cached thumbnails and show them
-    def show_thumbnails_for_person(person):
-        # Clear container
-        for child in thumbs_container.winfo_children():
-            child.destroy()
-        _tk_thumb_refs.clear()
+    def show_thumbnails_for_person(person, batch=0, batch_size=40):
+        # Clear container only when requesting first batch
+        if batch == 0:
+            for child in thumbs_container.winfo_children():
+                child.destroy()
+            _tk_thumb_refs.clear()
         files = person.get('files', [])
         if not files:
             return
         from case_agent.utils.thumbs import thumbnail_for_image
+        from case_agent.utils.image_overlay import overlay_matches_on_pil
         from PIL import Image, ImageTk
-        # show up to first 50 thumbnails in a simple grid
+        # show batch of thumbnails in a simple grid
         cols = 4
-        for idx, fpath in enumerate(files[:200]):
+        start = batch * batch_size
+        end = min(len(files), start + batch_size)
+        for idx, fpath in enumerate(files[start:end], start=start):
             try:
                 thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(160, 120))
-                img = Image.open(thumb_path)
+                img = Image.open(thumb_path).convert('RGB')
+                # overlay face matches on thumbnail if present
+                try:
+                    import sqlite3, json
+                    conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
+                    cur = conn.cursor()
+                    cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
+                    rows = cur.fetchall()
+                    conn.close()
+                    matches = []
+                    for r in rows:
+                        subj, pb = r[0], r[1]
+                        try:
+                            pbj = json.loads(pb) if pb else None
+                        except Exception:
+                            pbj = None
+                        matches.append({'subject': subj, 'probe_bbox': pbj})
+                    if matches:
+                        img = overlay_matches_on_pil(img, matches, size=img.size)
+                except Exception:
+                    pass
                 tkimg = ImageTk.PhotoImage(img)
             except Exception:
                 img = Image.new('RGB', (160, 120), color=(220, 220, 220))
@@ -197,20 +319,59 @@ def run_gui(report_path=REPORT):
             def on_click(ev, p=fpath):
                 # show full image in preview
                 try:
-                    pil = Image.open(p)
-                    pil.thumbnail((800, 600))
+                    if p.lower().endswith('.pdf'):
+                        from case_agent.utils.image_overlay import render_pdf_first_page
+                        pil = render_pdf_first_page(p, size=(1000, 800))
+                    else:
+                        pil = Image.open(p).convert('RGB')
+                    # fetch matches and overlay
+                    try:
+                        import sqlite3, json
+                        conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
+                        cur = conn.cursor()
+                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (p,))
+                        rows = cur.fetchall()
+                        conn.close()
+                        matches = []
+                        for r0 in rows:
+                            subj, pb = r0[0], r0[1]
+                            try:
+                                pbj = json.loads(pb) if pb else None
+                            except Exception:
+                                pbj = None
+                            matches.append({'subject': subj, 'probe_bbox': pbj})
+                        if matches:
+                            from case_agent.utils.image_overlay import overlay_matches_on_pil
+                            pil = overlay_matches_on_pil(pil, matches, size=None)
+                    except Exception:
+                        pass
+                    pil.thumbnail((1000, 800))
                     tkp = ImageTk.PhotoImage(pil)
                     preview.image = tkp
                     preview.config(image=tkp, text='')
-                except Exception:
-                    preview.config(text=f'Cannot open: {p}')
+                except Exception as e:
+                    preview.config(text=f'Cannot open: {p}\n{e}')
             lbl.bind('<Button-1>', on_click)
-            lbl.bind('<Double-1>', lambda ev, p=fpath: __import__('os').startfile(p))
+            # double-click open with configured PDF viewer when file is PDF, else system open
+            def on_double(ev, p=fpath):
+                if p.lower().endswith('.pdf'):
+                    # prefer configured viewer
+                    from case_agent import config as cfg
+                    viewer = getattr(cfg, 'PDF_VIEWER', None)
+                    if viewer:
+                        try:
+                            import subprocess
+                            subprocess.Popen([viewer, p])
+                            return
+                        except Exception:
+                            pass
+                __import__('os').startfile(p)
+            lbl.bind('<Double-1>', on_double)
 
             # right-click context menu
             def on_right_click(ev, p=fpath):
                 menu = tk.Menu(root, tearoff=0)
-                menu.add_command(label='Open file', command=lambda: __import__('os').startfile(p))
+                menu.add_command(label='Open file', command=lambda: on_double(None, p))
                 menu.add_command(label='Reveal in Explorer', command=lambda: __import__('subprocess').run(['explorer', '/select,', p]))
                 try:
                     menu.tk_popup(ev.x_root, ev.y_root)
@@ -221,6 +382,13 @@ def run_gui(report_path=REPORT):
         # update scrollregion
         canvas.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox('all'))
+        # if there are more batches, add a Load more button
+        total_batches = (len(files) + batch_size - 1) // batch_size
+        if batch + 1 < total_batches:
+            btn = ttk.Button(thumbs_container, text='Load more', command=lambda: show_thumbnails_for_person(person, batch=batch+1, batch_size=batch_size))
+            btn.grid(row=((end)//cols)+1, column=0, columnspan=cols, pady=6)
+            _tk_thumb_refs.append(btn)
+
 
     def show_gallery_for_selected_match(evt=None):
         sel = matches_lb.curselection()
@@ -250,21 +418,34 @@ def run_gui(report_path=REPORT):
         except Exception as e:
             preview.config(text=f'Cannot open image: {gpath}')
 
-    def on_select(evt):
-        sel = lb.curselection()
+    def on_select_from_list(listbox, list_source):
+        sel = listbox.curselection()
         if not sel:
             return
         idx = sel[0]
-        person = people[idx]
+        if idx >= len(list_source):
+            return
+        person = list_source[idx]
         text.delete('1.0', 'end')
         text.insert('end', f"Person: {person.get('person')}\nFiles ({person.get('file_count')}):\n")
+        # Populate document listbox
+        docs_lb.delete(0, 'end')
+        image_files = []
+        doc_files = []
         for f in person.get('files', []):
+            if Path(f).suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}:
+                image_files.append(f)
+            else:
+                doc_files.append(f)
             text.insert('end', f" - {f}\n")
         update_matches_for_person(person)
-        show_thumbnails_for_person(person)
+        show_thumbnails_for_person({'files': image_files, 'person': person.get('person'), 'file_count': len(image_files)})
+        for d in doc_files:
+            docs_lb.insert('end', d)
 
-    lb.bind('<<ListboxSelect>>', on_select)
+    # wire existing matches and docs events
     matches_lb.bind('<<ListboxSelect>>', show_gallery_for_selected_match)
+    docs_lb.bind('<Double-1>', lambda e: __import__('os').startfile(docs_lb.get(docs_lb.curselection()[0])) if docs_lb.curselection() else None)
 
     def export_selected():
         sel = lb.curselection()
@@ -280,15 +461,81 @@ def run_gui(report_path=REPORT):
     btn = ttk.Button(left, text='Export person CSV', command=export_selected)
     btn.pack(fill='x')
 
-    # Search/filter bindings
-    def do_search(evt=None):
-        refresh_people_list()
+    # Small helper to call Alfred query backend and show results
+    def handle_alfred_query(q: str):
+        if not q:
+            return
+        from case_agent.agent.alfred import parse_query, list_files_for_person
+        parsed = parse_query(q)
+        if parsed.get('action') != 'list':
+            text.insert('end', f"Alfred: I don't understand that query. Try 'list images of NAME'\n")
+            return
+        typ = parsed.get('type', 'images')
+        if typ in {'pictures'}:
+            typ = 'images'
+        person = parsed.get('person')
+        results = list_files_for_person(r'C:/Projects/FileAnalyzer/file_analyzer.db', person, typ=('images' if typ=='images' else 'documents' if typ=='documents' else 'all'))
+        if not results:
+            text.insert('end', f"Alfred: no {typ} found for {person}\n")
+            return
+        text.insert('end', f"Alfred: Found {len(results)} {typ} for {person}:\n")
+        for r in results:
+            text.insert('end', f" - {r}\n")
+        # show thumbnails of first few results
+        show_thumbnails_for_person({'files': results, 'person': person, 'file_count': len(results)}, batch=0)
 
-    search_entry.bind('<KeyRelease>', do_search)
+
+    # Search/filter bindings
+    # bind debounced search
+    search_entry.bind('<KeyRelease>', do_search_debounced)
     sort_combo.bind('<<ComboboxSelected>>', lambda e: refresh_people_list())
     type_filter_entry.bind('<FocusIn>', lambda e: type_filter_entry.delete(0, 'end'))
     type_filter_entry.bind('<KeyRelease>', lambda e: refresh_people_list())
 
+    # wire listbox selection handlers for all tabs
+    def _bind_listboxes():
+        lb_all.bind('<<ListboxSelect>>', lambda e: on_select_from_list(lb_all, _filtered_people))
+        lb_images.bind('<<ListboxSelect>>', lambda e: on_select_from_list(lb_images, _filtered_images))
+        lb_docs.bind('<<ListboxSelect>>', lambda e: on_select_from_list(lb_docs, _filtered_docs))
+    _bind_listboxes()
+
+    # keyboard shortcuts
+    def focus_search(evt=None):
+        search_entry.focus_set()
+        return 'break'
+
+    def next_person(evt=None):
+        try:
+            lb_all.select_clear(0, 'end')
+            cur = lb_all.curselection()
+            idx = cur[0] if cur else -1
+            idx = min(idx+1, lb_all.size()-1)
+            lb_all.select_set(idx)
+            lb_all.event_generate('<<ListboxSelect>>')
+        except Exception:
+            pass
+        return 'break'
+
+    def prev_person(evt=None):
+        try:
+            lb_all.select_clear(0, 'end')
+            cur = lb_all.curselection()
+            idx = cur[0] if cur else lb_all.size()
+            idx = max(idx-1, 0)
+            lb_all.select_set(idx)
+            lb_all.event_generate('<<ListboxSelect>>')
+        except Exception:
+            pass
+        return 'break'
+
+    def focus_alfred(evt=None):
+        chat_entry.focus_set()
+        return 'break'
+
+    root.bind('<Control-f>', focus_search)
+    root.bind('<n>', next_person)
+    root.bind('<p>', prev_person)
+    root.bind('<Control-l>', focus_alfred)
     root.mainloop()
 
 
