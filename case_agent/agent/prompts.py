@@ -1,5 +1,9 @@
-# Prompts for local LLM usage (strict JSON output requested)
-# Keep prompts offline and deterministic. Do not include any data not in evidence.
+"""Prompt templates for optional local LLM usage.
+
+These prompts are provided as structured templates for advanced users who
+run local LLMs; core pipeline behavior remains deterministic and does not
+require an LLM. Prompts are kept offline and should not leak sensitive data.
+"""
 
 FACT_EXTRACTION_PROMPT = '''
 You are a strict evidence extractor. Given the provided text blocks and their provenance, extract explicit facts only. Output must be valid JSON with keys: facts: [ {"text": ..., "sources": [{"sha256": ..., "path": ...}], "confidence": "low|medium|high"} ]

@@ -12,6 +12,12 @@ from typing import List
 
 
 def parse_query(q: str):
+    """Parse a simple Alfred query string.
+
+    Recognises patterns such as "list images of <name>", "show docs for <name>",
+    or a bare name (treated as list images of <name>). Returns a dict with
+    keys: action, type, person, where action is 'list' or 'unknown'.
+    """
     q = q.strip()
     # simple patterns: "list images of <name>", "show docs of <name>", "list files of <name>"
     m = re.match(r"(?i)\s*(list|show)\s+(images|docs|files|documents|pdfs|pictures)\s+(?:of|for)\s+(.+)", q)

@@ -536,10 +536,31 @@ def _persist_results(db_path: str | Path, res: dict, aggregate: bool = False):
                 if best:
                     fm = FaceMatch(source=source, probe_bbox=bbox, subject=None, gallery_path=best.get('gallery_path'), distance=float(best.get('distance')), created_at=now)
                     session.add(fm)
+                    # If there is no gallery_path (no match), copy the source crop into Images/unidentified for later processing
+                    try:
+                        if not best.get('gallery_path') and source and Path(source).exists():
+                            outdir = Path('Images') / 'unidentified'
+                            outdir.mkdir(parents=True, exist_ok=True)
+                            dst = outdir / Path(source).name
+                            if not dst.exists():
+                                import shutil
+                                shutil.copy2(source, dst)
+                    except Exception:
+                        pass
             else:
                 for m in face.get('matches', []):
                     fm = FaceMatch(source=source, probe_bbox=bbox, subject=None, gallery_path=m.get('gallery_path'), distance=float(m.get('distance')), created_at=now)
                     session.add(fm)
+                    try:
+                        if not m.get('gallery_path') and source and Path(source).exists():
+                            outdir = Path('Images') / 'unidentified'
+                            outdir.mkdir(parents=True, exist_ok=True)
+                            dst = outdir / Path(source).name
+                            if not dst.exists():
+                                import shutil
+                                shutil.copy2(source, dst)
+                    except Exception:
+                        pass
     session.commit()
 
 

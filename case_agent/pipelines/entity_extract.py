@@ -151,6 +151,75 @@ def extract_entities_for_file(path: Path, db_path=None):
     return entities
 
 
+def extract_entities_from_transcription(transcription_id: int, db_path=None):
+    """Extract entities from a Transcription row and persist them as Entity rows.
+
+    This allows audio/video transcriptions to be searched like textual files.
+    """
+    init_db(db_path) if db_path is not None else init_db()
+    session = get_session()
+    from ..db.models import Transcription, EvidenceFile
+    t = session.query(Transcription).filter_by(id=transcription_id).first()
+    if not t:
+        logger.error("Transcription id %s not found", transcription_id)
+        return []
+    file_row = session.query(EvidenceFile).filter_by(id=t.file_id).first()
+    if not file_row:
+        logger.error("File for transcription %s not found", transcription_id)
+        return []
+
+    text = (t.text or "")
+    provenance = {"sha256": getattr(file_row, 'sha256', None), "path": getattr(file_row, 'path', None), "transcription_id": t.id}
+    entities = []
+    seen = set()
+    if nlp:
+        try:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ in {"PERSON", "ORG", "DATE", "TIME", "GPE"}:
+                    key = (ent.label_, ent.text)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    e = Entity(file_id=file_row.id, entity_type=ent.label_, text=ent.text.strip(), span=f"{ent.start_char}-{ent.end_char}", provenance=provenance, confidence="high")
+                    session.add(e)
+                    entities.append({"entity_type": e.entity_type, "text": e.text, "confidence": e.confidence, "provenance": e.provenance})
+            session.commit()
+        except Exception:
+            logger.exception("spaCy NER failed for transcription %s; falling back to regex", transcription_id)
+    # fallback regex extraction similar to above
+    if not entities:
+        for m in DATE_RE.finditer(text):
+            key = ("DATE", m.group(0))
+            if key in seen:
+                continue
+            seen.add(key)
+            e = Entity(file_id=file_row.id, entity_type="DATE", text=m.group(0), span=f"{m.start()}-{m.end()}", provenance=provenance, confidence="medium")
+            session.add(e)
+            entities.append({"entity_type": e.entity_type, "text": e.text, "confidence": e.confidence, "provenance": e.provenance})
+        for m in re.finditer(r"\b([A-Z][A-Za-z0-9&'\-\.\s]{2,}?(?:\s+(?:Inc|Ltd|LLC|Corp|Co|Company|Corporation)))\b", text):
+            org = m.group(1).strip()
+            key = ("ORG", org)
+            if key in seen:
+                continue
+            seen.add(key)
+            e = Entity(file_id=file_row.id, entity_type="ORG", text=org, span=f"{m.start()}-{m.end()}", provenance=provenance, confidence="medium")
+            session.add(e)
+            entities.append({"entity_type": e.entity_type, "text": e.text, "confidence": e.confidence, "provenance": e.provenance})
+        for m in re.finditer(r"\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,})\b", text):
+            name = m.group(1)
+            key = ("PERSON", name)
+            if key in seen:
+                continue
+            seen.add(key)
+            e = Entity(file_id=file_row.id, entity_type="PERSON", text=name, span=f"{m.start()}-{m.end()}", provenance=provenance, confidence="low")
+            session.add(e)
+            entities.append({"entity_type": e.entity_type, "text": e.text, "confidence": e.confidence, "provenance": e.provenance})
+        session.commit()
+    logger.info("Extracted %d entities from transcription %s", len(entities), transcription_id)
+    return entities
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Extract entities deterministically from extracted text")

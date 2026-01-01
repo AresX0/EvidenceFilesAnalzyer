@@ -4,8 +4,47 @@ This is intentionally minimal so it can be imported safely; running it will open
 Tkinter window listing people and files.
 """
 from pathlib import Path
+from case_agent.gui.virtual_grid import VirtualThumbGrid, VirtualThumbGridModel
 
 REPORT = Path(r"C:/Projects/FileAnalyzer/reports/epstein_face_report.json")
+
+
+def handle_alfred_query(query: str):
+    """Process a textual Alfred query and display results in the UI when possible.
+
+    This is a defensive helper used by the GUI 'Ask' button. It parses the query,
+    retrieves matching files from the DB, and attempts to display them by setting
+    the virtual grid's person. It intentionally performs no blocking I/O on the
+    main thread and swallows exceptions to avoid crashing the GUI.
+    """
+    try:
+        from case_agent.agent.alfred import parse_query, list_files_for_person
+        import case_agent.config as cfg
+        parsed = parse_query(query)
+        if parsed.get('action') != 'list':
+            try:
+                import tkinter.messagebox as mb
+                mb.showinfo('Alfred', 'Unknown query')
+            except Exception:
+                pass
+            return
+        person = parsed.get('person')
+        typ = parsed.get('type', 'images')
+        db_path = getattr(cfg, 'DB_PATH', r'C:/Projects/FileAnalyzer/file_analyzer.db')
+        files = list_files_for_person(db_path, person, typ)
+        # Try to surface results in the GUI by updating the virtual grid if present
+        try:
+            import tkinter as tk
+            root = tk._default_root
+            if root:
+                vg = getattr(root, '_virtual_grid', None)
+                if vg:
+                    vg.set_person({'person': person, 'files': files, 'file_count': len(files)})
+        except Exception:
+            pass
+    except Exception:
+        import logging
+        logging.exception('Alfred query failed')
 
 
 def load_report(path=REPORT):
@@ -59,6 +98,13 @@ def run_gui(report_path=REPORT):
     menubar = tk.Menu(root)
     file_menu = tk.Menu(menubar, tearoff=0)
     def open_settings():
+        """Open the Settings dialog and allow saving of persistent options.
+
+        Settings available:
+        - PDF viewer path (optional)
+        - Show top subjects panel (toggle)
+        - Thumbnail render concurrency (integer)
+        """
         try:
             s = tk.Toplevel(root)
             s.title('Settings')
@@ -72,6 +118,9 @@ def run_gui(report_path=REPORT):
                 pdf_var.set('')
             pdf_entry = ttk.Entry(s, textvariable=pdf_var)
             pdf_entry.pack(fill='x', padx=8, pady=4)
+            status_lbl = ttk.Label(s, text='')
+            status_lbl.pack(anchor='w', padx=8, pady=(2,0))
+
             # Show top subjects option
             subjects_var = tk.BooleanVar(value=True)
             try:
@@ -80,24 +129,50 @@ def run_gui(report_path=REPORT):
             except Exception:
                 subjects_var.set(True)
             ttk.Checkbutton(s, text='Show top subjects panel', variable=subjects_var).pack(anchor='w', padx=8, pady=(4,4))
+
+            # concurrency control
             btn_frame = ttk.Frame(s)
             btn_frame.pack(fill='x', padx=8, pady=8)
+            ttk.Label(btn_frame, text='Thumbnail concurrency:').pack(side='left', padx=(0,4))
+            try:
+                import case_agent.config as cfg
+                cur_val = int(getattr(cfg, 'THUMB_RENDER_CONCURRENCY', 4) or 4)
+            except Exception:
+                cur_val = 4
+            conc_var = tk.IntVar(value=cur_val)
+            ttk.Spinbox(btn_frame, from_=1, to=16, textvariable=conc_var, width=4).pack(side='left')
+
             def autodetect():
                 from case_agent.utils.viewers import detect_pdf_viewer
                 v = detect_pdf_viewer()
                 if v:
                     pdf_var.set(str(v))
-            ttk.Button(btn_frame, text='Autodetect', command=autodetect).pack(side='left')
+                    status_lbl.config(text=f'Found: {Path(v).name}')
+                else:
+                    status_lbl.config(text='No PDF viewer found')
+
+            ttk.Button(btn_frame, text='Autodetect', command=autodetect).pack(side='left', padx=(8,0))
+
             def save_settings():
                 try:
                     import case_agent.config as cfg
                     cfg.PDF_VIEWER = pdf_var.get() or None
                     cfg.SHOW_TOP_SUBJECTS = bool(subjects_var.get())
+                    cfg.THUMB_RENDER_CONCURRENCY = int(conc_var.get())
                     cfg.save_user_config()
                     s.destroy()
                 except Exception:
                     s.destroy()
+
             ttk.Button(btn_frame, text='Save', command=save_settings).pack(side='right')
+
+            # show current value in status
+            try:
+                cur = pdf_var.get()
+                if cur:
+                    status_lbl.config(text=f'Current: {Path(cur).name}')
+            except Exception:
+                pass
         except Exception as e:
             print('Settings dialog failed', e)
     file_menu.add_command(label='Settings...', command=open_settings)
@@ -105,6 +180,35 @@ def run_gui(report_path=REPORT):
     file_menu.add_command(label='Quit', command=root.quit)
     menubar.add_cascade(label='File', menu=file_menu)
     root.config(menu=menubar)
+
+    # View menu: toggle UI panels
+    view_menu = tk.Menu(menubar, tearoff=0)
+    try:
+        import case_agent.config as cfg
+        _show_top = bool(getattr(cfg, 'SHOW_TOP_SUBJECTS', True))
+    except Exception:
+        _show_top = True
+    show_subjects_var = tk.BooleanVar(value=_show_top)
+    def _toggle_top_subjects():
+        val = bool(show_subjects_var.get())
+        try:
+            import case_agent.config as cfg
+            cfg.SHOW_TOP_SUBJECTS = val
+            cfg.save_user_config()
+        except Exception:
+            pass
+        if val:
+            try:
+                top_subjects_frame.pack(side='left', padx=(10,0))
+            except Exception:
+                pass
+        else:
+            try:
+                top_subjects_frame.pack_forget()
+            except Exception:
+                pass
+    view_menu.add_checkbutton(label='Show top subjects', onvalue=True, offvalue=False, variable=show_subjects_var, command=_toggle_top_subjects)
+    menubar.add_cascade(label='View', menu=view_menu)
 
     # Left panel (search + list)
     left = ttk.Frame(root, width=300)
@@ -233,13 +337,31 @@ def run_gui(report_path=REPORT):
     # Top subjects panel (configurable)
     # will be populated from report's 'top_subjects' or from face_matches list
     top_subjects_frame = ttk.Frame(top_frame)
-    top_subjects_frame.pack(side='left', padx=(10,0))
     top_subjects_label = ttk.Label(top_subjects_frame, text='Top subjects:')
     top_subjects_label.pack(anchor='w')
     top_subjects_list = tk.Listbox(top_subjects_frame, height=6)
     top_subjects_list.pack(fill='y')
     # Expose for tests
     root.top_subjects_frame = top_subjects_frame
+    # Populate top subjects from the report if available and show/hide based on config
+    try:
+        import case_agent.config as cfg
+        SHOW_TOP = bool(getattr(cfg, 'SHOW_TOP_SUBJECTS', True))
+    except Exception:
+        SHOW_TOP = True
+    if SHOW_TOP:
+        top_subjects_frame.pack(side='left', padx=(10,0))
+        try:
+            for s in rpt.get('top_subjects', []):
+                top_subjects_list.insert('end', f"{s.get('subject')} ({s.get('count')})")
+        except Exception:
+            pass
+    else:
+        # hide if the user turned this off
+        try:
+            top_subjects_frame.pack_forget()
+        except Exception:
+            pass
 
     # Documents list for selected person (double-click to open)
     docs_label = ttk.Label(top_frame, text='Documents')
@@ -248,8 +370,9 @@ def run_gui(report_path=REPORT):
     docs_lb.pack(side='left', fill='y')
 
     # Alfred chat / voice input frame
+    # Chat / assistant area is placed at the bottom for a cleaner content flow
     chat_frame = ttk.Frame(right)
-    chat_frame.pack(fill='x')
+    chat_frame.pack(side='bottom', fill='x', pady=(8,0))
     chat_label = ttk.Label(chat_frame, text='Alfred:')
     chat_label.pack(side='left')
     chat_entry = ttk.Entry(chat_frame)
@@ -258,6 +381,8 @@ def run_gui(report_path=REPORT):
     chat_btn.pack(side='left')
     mic_btn = ttk.Button(chat_frame, text='Mic', state='disabled')
     mic_btn.pack(side='left', padx=(4,0))
+
+    # Try to enable mic button if speech_recognition available and microphone present
 
     # Try to enable mic button if speech_recognition available and microphone present
     try:
@@ -351,173 +476,27 @@ def run_gui(report_path=REPORT):
         for r in rows:
             matches_lb.insert('end', f"{r[0]} ({r[1]})")
 
-    # Virtualized thumbnails: render only items in visible region
-    class VirtualThumbGrid:
-        def __init__(self, canvas, container, cols=4, thumb_size=(160,120), gap=(4,4)):
-            self.canvas = canvas
-            self.container = container
-            self.cols = cols
-            self.thumb_w, self.thumb_h = thumb_size
-            self.gx, self.gy = gap
-            self.rendered = {}  # idx -> widget
-            self.files = []
-            self.person = None
-            self.batch_size = 40
-            # executor for background thumbnail generation
-            from concurrent.futures import ThreadPoolExecutor
-            self._executor = ThreadPoolExecutor(max_workers=4)
-            self._futures = {}  # idx -> future
-            # debounce handle for scroll events
-            self._scheduled_id = None
-            # throttle small initial batch to make UI responsive
-            self._initial_load = True
-
-        def set_person(self, person):
-            # reset state
-            self.person = person
-            self.files = person.get('files', []) if person else []
-            # clear existing widgets
-            for w in list(self.rendered.values()):
-                try:
-                    w.destroy()
-                except Exception:
-                    pass
-            self.rendered.clear()
-            # cancel outstanding futures
-            for f in list(self._futures.values()):
-                try:
-                    f.cancel()
-                except Exception:
-                    pass
-            self._futures.clear()
-            self.container.update_idletasks()
-            self._layout_placeholder()
-            self._on_scroll()
-
-        def _layout_placeholder(self):
-            # set container grid rows to match count so scrollregion computed
-            n = len(self.files)
-            rows = (n + self.cols - 1) // self.cols
-            self.container.update_idletasks()
-            self.canvas.configure(scrollregion=(0,0, self.cols*(self.thumb_w+self.gx), rows*(self.thumb_h+self.gy)))
-
-        def _visible_range(self):
-            y0, y1 = self.canvas.yview()
-            bbox = self.canvas.bbox('all') or (0,0,0,0)
-            total_h = bbox[3] - bbox[1] if bbox else 0
-            if total_h == 0:
-                return 0, -1
-            vy0 = int(y0 * total_h)
-            vy1 = int(y1 * total_h)
-            row0 = max(0, vy0 // (self.thumb_h + self.gy) - 1)
-            row1 = (vy1 // (self.thumb_h + self.gy)) + 1
-            start = row0 * self.cols
-            end = min(len(self.files), (row1+1) * self.cols)
-            return start, end
-
-        def _on_scroll(self, evt=None):
-            # debounce rapid scroll events to avoid excessive work
-            try:
-                if self._scheduled_id:
-                    root.after_cancel(self._scheduled_id)
-            except Exception:
-                pass
-            self._scheduled_id = root.after(100, self._do_on_scroll)
-
-        def _do_on_scroll(self):
-            self._scheduled_id = None
-            start, end = self._visible_range()
-            # remove widgets outside range
-            for idx in list(self.rendered.keys()):
-                if idx < start or idx >= end:
-                    try:
-                        self.rendered[idx].destroy()
-                    except Exception:
-                        pass
-                    del self.rendered[idx]
-            # render missing widgets
-            for idx in range(start, end):
-                if idx in self.rendered:
-                    continue
-                fpath = self.files[idx]
-                # create placeholder
-                from PIL import Image, ImageTk
-                placeholder = Image.new('RGB', (self.thumb_w, self.thumb_h), color=(240,240,240))
-                ph_img = ImageTk.PhotoImage(placeholder)
-                lbl = ttk.Label(self.container, image=ph_img, text='Loading...', compound='center')
-                lbl.image = ph_img
-                r = idx // self.cols
-                c = idx % self.cols
-                lbl.grid(row=r, column=c, padx=self.gx, pady=self.gy)
-                self.rendered[idx] = lbl
-                # schedule background render
-                if idx not in self._futures:
-                    fut = self._executor.submit(self._render_thumb, idx, fpath)
-                    # schedule main-thread UI update on completion
-                    fut.add_done_callback(lambda fut, ix=idx, s=self: root.after(0, lambda: s._apply_rendered(ix, fut.result())))
-                    self._futures[idx] = fut
-            # update scrollregion just in case
-            self.container.update_idletasks()
-            self.canvas.configure(scrollregion=self.canvas.bbox('all'))
-
-        def _render_thumb(self, idx, fpath):
-            # runs in worker thread: prepare PIL.Image
-            try:
-                from case_agent.utils.thumbs import thumbnail_for_image
-                from case_agent.utils.image_overlay import overlay_matches_on_pil
-                from PIL import Image
-                thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(self.thumb_w, self.thumb_h))
-                img = Image.open(thumb_path).convert('RGB')
-                # overlay small match marker
-                try:
-                    import sqlite3, json
-                    conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
-                    cur = conn.cursor()
-                    cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
-                    rows = cur.fetchall()
-                    conn.close()
-                    matches = []
-                    for r in rows:
-                        subj, pb = r[0], r[1]
-                        try:
-                            pbj = json.loads(pb) if pb else None
-                        except Exception:
-                            pbj = None
-                        matches.append({'subject': subj, 'probe_bbox': pbj})
-                    if matches:
-                        img = overlay_matches_on_pil(img, matches, size=img.size)
-                except Exception:
-                    pass
-                return img
-            except Exception:
-                from PIL import Image
-                return Image.new('RGB', (self.thumb_w, self.thumb_h), color=(220,220,220))
-
-        def _apply_rendered(self, idx, pil_img):
-            # must run in main thread to create PhotoImage
-            try:
-                from PIL import ImageTk
-                if idx not in self.rendered:
-                    return
-                tkimg = ImageTk.PhotoImage(pil_img)
-                lbl = self.rendered[idx]
-                lbl.config(image=tkimg)
-                lbl.image = tkimg
-            except Exception:
-                pass
-
-        def shutdown(self):
-            try:
-                self._executor.shutdown(wait=False)
-            except Exception:
-                pass
+# Virtual grid implementation moved to case_agent.gui.virtual_grid
+# The UI uses: from case_agent.gui.virtual_grid import VirtualThumbGrid, VirtualThumbGridModel
 
     # install virtualization handler
-    _virtual_grid = VirtualThumbGrid(canvas, thumbs_container, cols=4, thumb_size=(160,120))
-    canvas.bind('<Configure>', lambda e: _virtual_grid._on_scroll())
-    canvas.bind_all('<MouseWheel>', lambda e: (canvas.yview_scroll(int(-1*(e.delta/120)), 'units'), _virtual_grid._on_scroll()))
-    def show_thumbnails_for_person(person):
-        _virtual_grid.set_person(person)
+        try:
+            _virtual_grid = VirtualThumbGrid(canvas, thumbs_container, cols=4, thumb_size=(160,120))
+            # expose for tests and debug
+            root._virtual_grid = _virtual_grid
+            canvas.bind('<Configure>', lambda e: _virtual_grid._on_scroll())
+            canvas.bind_all('<MouseWheel>', lambda e: (canvas.yview_scroll(int(-1*(e.delta/120)), 'units'), _virtual_grid._on_scroll()))
+            def show_thumbnails_for_person(person):
+                _virtual_grid.set_person(person)
+        except Exception as e:
+            # If anything goes wrong, ensure GUI still runs and record error on root for debugging
+            try:
+                root._virtual_grid = None
+                root._virtual_grid_error = repr(e)
+            except Exception:
+                pass
+            def show_thumbnails_for_person(person):
+                return
 
 
     def show_gallery_for_selected_match(evt=None):

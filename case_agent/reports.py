@@ -1,6 +1,7 @@
 """Extended audit report generation utilities."""
 from pathlib import Path
 from typing import Dict, Any, List
+import os
 from .db.init_db import init_db, get_session
 from .db.models import EvidenceFile, ExtractedText, Entity, Event, Transcription
 import json
@@ -170,9 +171,10 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
         # Non-fatal: report without face matches
         pass
 
-    # Build person -> files mapping
+    # Build person -> files mapping (split by media type)
     from collections import defaultdict
     person_files_map = defaultdict(lambda: set())
+    person_media_map = defaultdict(lambda: {"text": set(), "images": set(), "documents": set(), "audio": set(), "video": set()})
     # Try to use file_id when present, otherwise use provenance sha lookup
     for e in session.query(Entity).filter(Entity.entity_type == 'PERSON').all():
         prov = e.provenance or {}
@@ -192,10 +194,68 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
                     file_path = frow.path
         if file_path:
             person_files_map[e.text].add(file_path)
+            suffix = Path(file_path).suffix.lower()
+            if suffix in {'.pdf', '.txt', '.docx', '.doc'}:
+                person_media_map[e.text]['documents'].add(file_path)
+            elif suffix in {'.png', '.jpg', '.jpeg', '.gif', '.tiff', '.bmp'}:
+                person_media_map[e.text]['images'].add(file_path)
+            elif suffix in {'.mp4', '.mov', '.mkv', '.avi'}:
+                person_media_map[e.text]['video'].add(file_path)
+            elif suffix in {'.wav', '.mp3'}:
+                person_media_map[e.text]['audio'].add(file_path)
+            else:
+                # default place into documents
+                person_media_map[e.text]['documents'].add(file_path)
+
+    # Include face match subjects (visual detections)
+    from .db.models import FaceMatch
+    for fm in session.query(FaceMatch).all():
+        subj = fm.subject
+        src = fm.source
+        if not src:
+            continue
+        # if subject present, map subject->source file (try to find an EvidenceFile matching the source)
+        fpath = None
+        try:
+            # exact match
+            ef = session.query(EvidenceFile).filter_by(path=src).first()
+            if ef:
+                fpath = ef.path
+            else:
+                # try matching by suffix or containing pattern
+                for frow in session.query(EvidenceFile).all():
+                    if str(src).startswith(str(frow.path)) or str(frow.path).startswith(str(src)) or Path(src).stem.startswith(Path(frow.path).stem):
+                        fpath = frow.path
+                        break
+        except Exception:
+            fpath = src
+        if subj:
+            person_files_map[subj].add(fpath or src)
+            # classify by file suffix if available
+            sfx = Path(fpath or src).suffix.lower()
+            if sfx in {'.png', '.jpg', '.jpeg', '.gif', '.tiff', '.bmp'}:
+                person_media_map[subj]['images'].add(fpath or src)
+            elif sfx in {'.mp4', '.mov', '.mkv', '.avi'}:
+                person_media_map[subj]['video'].add(fpath or src)
+            elif sfx in {'.wav', '.mp3'}:
+                person_media_map[subj]['audio'].add(fpath or src)
+            else:
+                person_media_map[subj]['images'].add(fpath or src)
+        else:
+            # Unidentified; create an 'Unidentified N' placeholder subject
+            placeholder = f"Unidentified_{abs(hash(src)) % 100000}"
+            person_files_map[placeholder].add(fpath or src)
+            person_media_map[placeholder]['images'].add(fpath or src)
 
     people = []
     for person, paths in sorted(person_files_map.items(), key=lambda x: (-len(x[1]), x[0])):
-        people.append({'person': person, 'file_count': len(paths), 'files': sorted(paths)})
+        media = person_media_map.get(person, {"text": set(), "images": set(), "documents": set(), "audio": set(), "video": set()})
+        people.append({
+            'person': person,
+            'file_count': len(paths),
+            'files': sorted(paths),
+            'media': {k: sorted(v) for k, v in media.items()},
+        })
 
     # Build PDF synopses: top entities per PDF and first excerpt
     pdf_synopses = []
@@ -363,6 +423,34 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
                 fh.write('</tr>')
         fh.write('</table>')
 
+        # Aggregate People by Media Type
+        fh.write('<h2>People — By Media Type</h2>')
+        def _write_media_section(media_key, title):
+            fh.write(f'<h3>{title}</h3>')
+            fh.write('<table border="1"><tr><th>Person</th><th>Count</th><th>Files</th></tr>')
+            for person in report.get('people', []):
+                name = person.get('person')
+                files = person.get('media', {}).get(media_key, [])
+                if not files:
+                    continue
+                files_links = []
+                for f in files:
+                    try:
+                        files_links.append(f"<a href=\"file:///{Path(f).as_posix()}\">{Path(f).name}</a>")
+                    except Exception:
+                        files_links.append(f)
+                fh.write('<tr>')
+                fh.write(f"<td><a href=\"people/{''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')}.html\">{name}</a></td>")
+                fh.write(f"<td>{len(files)}</td>")
+                fh.write(f"<td>{'<br/>'.join(files_links)}</td>")
+                fh.write('</tr>')
+            fh.write('</table>')
+
+        _write_media_section('text', 'People — Text')
+        _write_media_section('images', 'People — Images')
+        _write_media_section('video', 'People — Video')
+        _write_media_section('audio', 'People — Audio')
+
         fh.write('<h2>People — Documents</h2>')
         fh.write('<table border="1"><tr><th>Person</th><th>Document Count</th><th>Documents</th></tr>')
         for person in report.get('people', []):
@@ -396,59 +484,84 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         fh.write('</body></html>')
 
     # write per-person pages with pre-rendered overlay thumbnails when matches exist
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _create_overlay_task(tpath, fpath):
+        overlay_path = None
+        try:
+            matches = []
+            try:
+                fmap = report.get('face_matches_map') or {}
+                matches = fmap.get(fpath, []) or []
+            except Exception:
+                matches = []
+            if not matches:
+                try:
+                    import sqlite3, json
+                    conn = sqlite3.connect(str(Path(reports_dir).parent / 'file_analyzer.db'))
+                    cur = conn.cursor()
+                    cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
+                    rows = cur.fetchall()
+                    conn.close()
+                    for r in rows:
+                        subj, pb = r[0], r[1]
+                        try:
+                            pbj = json.loads(pb) if pb else None
+                        except Exception:
+                            pbj = None
+                        matches.append({'subject': subj, 'probe_bbox': pbj})
+                except Exception:
+                    matches = []
+            if matches:
+                from .utils.image_overlay import overlay_matches_on_pil
+                from PIL import Image
+                img = Image.open(tpath).convert('RGB')
+                img = overlay_matches_on_pil(img, matches, size=img.size)
+                overlay_path = Path(reports_dir) / ('overlay_' + Path(tpath).name)
+                img.save(overlay_path, format='JPEG', quality=85)
+        except Exception:
+            overlay_path = None
+        return (fpath, overlay_path)
+
     for person in report.get('people', []):
         name = person.get('person')
         safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
         person_page_path = people_dir / f"{safe_name}.html"
+
+        # Gather thumbnails and overlay tasks for this person
+        thumb_map = {}
+        overlay_tasks = []
+        for fpath in person.get('files', []):
+            try:
+                tpath = thumbnail_for_image(fpath, reports_dir, size=(400, 300))
+                thumb_map[fpath] = tpath
+                overlay_tasks.append((tpath, fpath))
+            except Exception:
+                thumb_map[fpath] = None
+
+        # run overlay tasks in parallel
+        overlays_by_file = {}
+        if overlay_tasks:
+            max_workers = min(4, (os.cpu_count() or 1))
+            with ThreadPoolExecutor(max_workers=max_workers) as exe:
+                futures = {exe.submit(_create_overlay_task, t, f): (t, f) for (t, f) in overlay_tasks}
+                for fut in as_completed(futures):
+                    fpath, overlay_path = fut.result()
+                    overlays_by_file[fpath] = overlay_path
+
+        # now write the person page referencing overlays where present
         with open(person_page_path, 'w', encoding='utf-8') as ph:
             ph.write('<html><head><meta charset="utf-8"><title>Person</title></head><body>')
             ph.write(f"<h1>{name}</h1>")
             ph.write('<ul>')
             for fpath in person.get('files', []):
                 try:
-                    # create a thumbnail and overlay matches if present
-                    tpath = thumbnail_for_image(fpath, reports_dir, size=(400, 300))
-                    overlay_path = None
-                    matches = []
-                    # prefer face_matches_map from report if available (faster)
-                    try:
-                        fmap = report.get('face_matches_map') or {}
-                        matches = fmap.get(fpath, []) or []
-                    except Exception:
-                        matches = []
-                    if not matches:
-                        # fallback to DB query
-                        try:
-                            import sqlite3, json
-                            conn = sqlite3.connect(str(Path(reports_dir).parent / 'file_analyzer.db'))
-                            cur = conn.cursor()
-                            cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
-                            rows = cur.fetchall()
-                            conn.close()
-                            for r in rows:
-                                subj, pb = r[0], r[1]
-                                try:
-                                    pbj = json.loads(pb) if pb else None
-                                except Exception:
-                                    pbj = None
-                                matches.append({'subject': subj, 'probe_bbox': pbj})
-                        except Exception:
-                            matches = []
-                    if matches:
-                        try:
-                            from .utils.image_overlay import overlay_matches_on_pil
-                            from PIL import Image
-                            img = Image.open(tpath).convert('RGB')
-                            img = overlay_matches_on_pil(img, matches, size=img.size)
-                            overlay_path = Path(reports_dir) / ('overlay_' + Path(tpath).name)
-                            img.save(overlay_path, format='JPEG', quality=85)
-                        except Exception:
-                            overlay_path = None
-                    rel = Path('thumbnails') / Path(tpath).name
+                    tpath = thumb_map.get(fpath)
+                    overlay_path = overlays_by_file.get(fpath)
+                    rel = Path('thumbnails') / Path(tpath).name if tpath else ''
                     ph.write('<li>')
                     if overlay_path:
                         ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{Path('thumbnails') / overlay_path.name}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
-                    else:
+                    elif tpath:
                         ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{rel.as_posix()}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
                     ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\">{fpath}</a>")
                     ph.write('</li>')

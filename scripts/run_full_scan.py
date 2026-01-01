@@ -32,6 +32,17 @@ from scripts.pdf_face_detect import process_pdf
 
 
 def process_pdf_file(p: Path, faces_out: Path, gallery: Path, db_path: Path, aggregate=True, threshold=0.9, top_k=5):
+    """Process a PDF file: render pages, detect faces (via scripts/pdf_face_detect.py),
+    and match detected face crops against the labeled gallery.
+
+    Parameters:
+    - p: Path to the PDF file
+    - faces_out: Directory in which to write face crops (if generated)
+    - gallery: Path to labeled gallery to match against
+    - db_path: Path to SQLite DB used to persist match results
+    - aggregate: If True, aggregate results in DB rather than inserting raw
+    - threshold, top_k: matching thresholds passed to search routine
+    """
     res = process_pdf(p, faces_out)
     # for each page, check crops
     for pg in res.get('pages', []):
@@ -43,6 +54,14 @@ def process_pdf_file(p: Path, faces_out: Path, gallery: Path, db_path: Path, agg
 
 
 def process_image_file(p: Path, faces_out: Path, gallery: Path, db_path: Path, aggregate=True, threshold=0.9, top_k=5):
+    """Process an image file:
+    - Attempt face detection; if no faces are detected, compute an embedding for the
+      whole image and compare with the labeled gallery.
+    - If faces are detected and a crop can be created, save the crop to `faces_out`
+      and perform per-crop gallery matching.
+
+    Parameters: same as `process_pdf_file`.
+    """
     # detect faces and save crops if desired
     dets = face_search.find_faces_in_image(p)
     if not dets:
@@ -76,6 +95,14 @@ def process_image_file(p: Path, faces_out: Path, gallery: Path, db_path: Path, a
 
 
 def process_video_file(p: Path, gallery: Path, db_path: Path, aggregate=True, threshold=0.9, top_k=5, interval=5.0):
+    """Process a video file:
+    - Sample frames at the given interval and detect faces in each sampled frame.
+    - For each detection, compare the embedding to the gallery embeddings and persist
+      matches to the DB if they meet the threshold.
+
+    Parameters:
+    - interval: sampling interval in seconds
+    """
     frames = face_search.find_faces_in_video(p, interval_seconds=interval)
     for frame in frames:
         ts = frame.get('timestamp')
@@ -98,6 +125,19 @@ def process_video_file(p: Path, gallery: Path, db_path: Path, aggregate=True, th
 
 
 def run_full_scan(root: Path, gallery: Path, db_path: Path, faces_out: Path, out_dir: Path, aggregate=True, threshold=0.9, top_k=5, limit=0):
+    """Run a full dataset scan over `root` and generate reports.
+
+    Workflow:
+    1. Initialize DB and inventory files (walk & hash)
+    2. For each file, run extractors (text, entities, media) and analysis (face matching)
+    3. Build timeline and generate JSON/CSV/HTML reports under `out_dir`
+
+    Parameters:
+    - gallery: path to labeled gallery for face matching
+    - faces_out: directory where face crops are written
+    - aggregate: whether to aggregate match results into DB
+    - limit: optional limit to number of files processed (0 means no limit)
+    """
     start = time.time()
     init_db(db_path)
     # 1) inventory

@@ -66,6 +66,17 @@ def persist_transcription(session, file_row, transcription):
     session.add(t)
     session.commit()
     logger.info("Saved transcription (id=%s) for file %s", t.id, file_row.path)
+    # Extract entities from the transcription so that audio/video mentions are searchable
+    try:
+        from . import entity_extract
+        try:
+            entity_extract.extract_entities_from_transcription(t.id, db_path=db_path)
+        except Exception:
+            # import relative fallback
+            from ..pipelines.entity_extract import extract_entities_from_transcription
+            extract_entities_from_transcription(t.id, db_path=db_path)
+    except Exception:
+        logger.exception("Failed to extract entities from transcription id %s", t.id)
     return t
 
 
