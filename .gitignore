@@ -26,6 +26,7 @@ build/
 faces_*
 gallery_*/
 reports/
+Images/unidentified/
 queue_state.json
 config.json
 file_analyzer.db
