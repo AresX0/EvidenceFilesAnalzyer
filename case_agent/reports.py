@@ -272,9 +272,15 @@ def write_report_csv(report: Dict[str, Any], path: str | Path):
 
 
 def write_report_html(report: Dict[str, Any], path: str | Path):
-    """Create a simple HTML summary report for quick viewing."""
+    """Create a simple HTML summary report for quick viewing, plus per-person pages with thumbnails."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    reports_dir = p.parent
+    # Ensure thumbnails dir exists via thumbnail util when needed
+    from case_agent.utils.thumbs import thumbnail_for_image
+    people_dir = reports_dir / 'people'
+    people_dir.mkdir(parents=True, exist_ok=True)
+
     with open(p, 'w', encoding='utf-8') as fh:
         fh.write('<html><head><meta charset="utf-8"><title>Audit Report</title></head><body>')
         fh.write('<h1>Audit Report</h1>')
@@ -305,15 +311,26 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         fh.write(f"<li>Media without transcription: {len(issues.get('media_no_transcription', []))}</li>")
         fh.write('</ul>')
 
-        # People and file annotations
+        # People and file annotations with inline thumbnails and per-person pages
         fh.write('<h2>People (annotated with files)</h2>')
-        fh.write('<table border="1"><tr><th>Person</th><th>File Count</th><th>Files</th></tr>')
-        for p in report.get('people', []):
+        fh.write('<table border="1"><tr><th>Person</th><th>File Count</th><th>Preview</th></tr>')
+        for person in report.get('people', []):
+            name = person.get('person')
+            safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
+            person_page = f"people/{safe_name}.html"
+            # prepare thumbnails for first few files
+            thumbs_html = []
+            for fpath in person.get('files', [])[:8]:
+                try:
+                    tpath = thumbnail_for_image(fpath, reports_dir, size=(200, 150))
+                    rel = Path('thumbnails') / Path(tpath).name
+                    thumbs_html.append(f"<a href=\"{person_page}\"><img src=\"{rel.as_posix()}\" style=\"max-width:200px;margin:4px;\" /></a>")
+                except Exception:
+                    pass
             fh.write('<tr>')
-            fh.write(f"<td>{p.get('person')}</td>")
-            fh.write(f"<td>{p.get('file_count')}</td>")
-            files_html = '<br/>'.join(p.get('files', []))
-            fh.write(f"<td>{files_html}</td>")
+            fh.write(f"<td><a href=\"{person_page}\">{name}</a></td>")
+            fh.write(f"<td>{person.get('file_count')}</td>")
+            fh.write(f"<td>{''.join(thumbs_html)}</td>")
             fh.write('</tr>')
         fh.write('</table>')
 
@@ -329,4 +346,27 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
             fh.write('</div>')
 
         fh.write('</body></html>')
+
+    # write per-person pages
+    for person in report.get('people', []):
+        name = person.get('person')
+        safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in name]).replace(' ', '_')
+        person_page_path = people_dir / f"{safe_name}.html"
+        with open(person_page_path, 'w', encoding='utf-8') as ph:
+            ph.write('<html><head><meta charset="utf-8"><title>Person</title></head><body>')
+            ph.write(f"<h1>{name}</h1>")
+            ph.write('<ul>')
+            for fpath in person.get('files', []):
+                try:
+                    tpath = thumbnail_for_image(fpath, reports_dir, size=(400, 300))
+                    rel = Path('thumbnails') / Path(tpath).name
+                    ph.write('<li>')
+                    ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\"><img src=\"{rel.as_posix()}\" style=\"max-width:400px;margin:4px;\" /></a><br/>")
+                    ph.write(f"<a href=\"file:///{Path(fpath).as_posix()}\">{fpath}</a>")
+                    ph.write('</li>')
+                except Exception:
+                    ph.write(f"<li>{fpath}</li>")
+            ph.write('</ul>')
+            ph.write('</body></html>')
+
 
