@@ -33,3 +33,10 @@ file_analyzer.db
 # Editor
 .vscode/
 .idea/
+epstein_*.json
+epstein_*.html
+epstein_*.csv
+audit_report.json
+face_match_*.json
+pdf_face_results_*.json
+added
