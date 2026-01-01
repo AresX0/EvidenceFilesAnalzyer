@@ -1,0 +1,17 @@
+case_agent/
+├── agent/
+│   ├── agent.py
+│   ├── prompts.py
+│   └── rules.md
+├── pipelines/
+│   ├── hash_inventory.py
+│   ├── text_extract.py
+│   ├── media_extract.py
+│   ├── entity_extract.py
+│   └── timeline_builder.py
+├── db/
+│   ├── models.py
+│   └── init_db.py
+├── config.py
+├── main.py
+└── requirements.txt

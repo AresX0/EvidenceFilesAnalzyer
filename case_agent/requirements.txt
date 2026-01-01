@@ -1,0 +1,9 @@
+SQLAlchemy>=1.4
+PyPDF2>=3.0
+python-docx
+pillow
+pytesseract
+spacy
+# Optional heavy deps (not required to run core inventory):
+# whisper
+# ffmpeg needs to be installed on the system path

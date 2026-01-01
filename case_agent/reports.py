@@ -155,10 +155,66 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
         init_db(db_path)
         session = get_session()
         for fm in session.query(FaceMatch).order_by(FaceMatch.created_at.desc()).limit(1000).all():
-            face_matches.append({'source': fm.source, 'probe_bbox': fm.probe_bbox, 'subject': fm.subject, 'gallery_path': fm.gallery_path, 'distance': fm.distance, 'created_at': fm.created_at})
+            created = fm.created_at.isoformat() if hasattr(fm.created_at, 'isoformat') else fm.created_at
+            face_matches.append({'source': fm.source, 'probe_bbox': fm.probe_bbox, 'subject': fm.subject, 'gallery_path': fm.gallery_path, 'distance': fm.distance, 'created_at': created})
     except Exception:
         # Non-fatal: report without face matches
         pass
+
+    # Build person -> files mapping
+    from collections import defaultdict
+    person_files_map = defaultdict(lambda: set())
+    # Try to use file_id when present, otherwise use provenance sha lookup
+    for e in session.query(Entity).filter(Entity.entity_type == 'PERSON').all():
+        prov = e.provenance or {}
+        file_path = None
+        # try explicit file_id attribute
+        file_id = getattr(e, 'file_id', None)
+        if file_id:
+            frow = session.query(EvidenceFile).filter_by(id=file_id).first()
+            if frow:
+                file_path = frow.path
+        # try provenance sha
+        if file_path is None and isinstance(prov, dict):
+            sha = prov.get('sha256')
+            if sha:
+                frow = session.query(EvidenceFile).filter_by(sha256=sha).first()
+                if frow:
+                    file_path = frow.path
+        if file_path:
+            person_files_map[e.text].add(file_path)
+
+    people = []
+    for person, paths in sorted(person_files_map.items(), key=lambda x: (-len(x[1]), x[0])):
+        people.append({'person': person, 'file_count': len(paths), 'files': sorted(paths)})
+
+    # Build PDF synopses: top entities per PDF and first excerpt
+    pdf_synopses = []
+    from sqlalchemy import func
+    for f in session.query(EvidenceFile).filter(EvidenceFile.path.ilike('%.pdf')).all():
+        # top entities in this file
+        ents = []
+        try:
+            # prefer file_id on Entity if present
+            rows = session.query(Entity.text, func.count(Entity.id)).filter(getattr(Entity, 'file_id', None) == f.id).group_by(Entity.text).order_by(func.count(Entity.id).desc()).limit(5).all()
+            if not rows:
+                # fallback to provenance sha matching
+                rows = session.query(Entity.text, func.count(Entity.id)).filter(Entity.provenance['sha256'].astext == f.sha256).group_by(Entity.text).order_by(func.count(Entity.id).desc()).limit(5).all()
+        except Exception:
+            rows = []
+        ents = [{'text': r[0], 'count': int(r[1])} for r in rows]
+        # excerpt
+        ex = None
+        # excerpts dict keys are sha or file_id
+        if f.sha256 in excerpts:
+            ex_list = excerpts.get(f.sha256)
+            if ex_list:
+                ex = ex_list[0].get('excerpt')
+        elif f.id in excerpts:
+            ex_list = excerpts.get(f.id)
+            if ex_list:
+                ex = ex_list[0].get('excerpt')
+        pdf_synopses.append({'path': f.path, 'sha256': f.sha256, 'top_entities': ents, 'excerpt': ex})
 
     report = {
         "files": files,
@@ -172,6 +228,8 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
         "timeline_summary": timeline_summary,
         "issues": issues,
         "person_presence": person_presence,
+        "people": people,
+        "pdf_synopses": pdf_synopses,
         "face_matches": face_matches,
     }
     return report
@@ -246,6 +304,29 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         fh.write(f"<li>PDFs with no text: {len(issues.get('pdfs_no_text', []))}</li>")
         fh.write(f"<li>Media without transcription: {len(issues.get('media_no_transcription', []))}</li>")
         fh.write('</ul>')
+
+        # People and file annotations
+        fh.write('<h2>People (annotated with files)</h2>')
+        fh.write('<table border="1"><tr><th>Person</th><th>File Count</th><th>Files</th></tr>')
+        for p in report.get('people', []):
+            fh.write('<tr>')
+            fh.write(f"<td>{p.get('person')}</td>")
+            fh.write(f"<td>{p.get('file_count')}</td>")
+            files_html = '<br/>'.join(p.get('files', []))
+            fh.write(f"<td>{files_html}</td>")
+            fh.write('</tr>')
+        fh.write('</table>')
+
+        # PDF synopses
+        fh.write('<h2>PDF Synopses</h2>')
+        for s in report.get('pdf_synopses', []):
+            fh.write('<div style="margin-bottom:1em; padding:0.5em; border:1px solid #ccc;">')
+            fh.write(f"<h3>{s.get('path')}</h3>")
+            fh.write('<strong>Top entities:</strong> ')
+            fh.write(', '.join([f"{e.get('text')} ({e.get('count')})" for e in s.get('top_entities', [])]))
+            if s.get('excerpt'):
+                fh.write(f"<p><em>Excerpt:</em> {s.get('excerpt')}</p>")
+            fh.write('</div>')
 
         fh.write('</body></html>')
 

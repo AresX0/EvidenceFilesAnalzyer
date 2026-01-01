@@ -1,0 +1,68 @@
+{
+  "files": [
+    {
+      "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_audio.wav",
+      "sha256": "643f8a8dc8bd9c19225afffad2becfec5426180b3749cb208abdf1a6c8354efc",
+      "size": 32044
+    },
+    {
+      "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_img.png",
+      "sha256": "48e23d516b60c2b9566bf6d76d3ca7e83ad1f22e2ad892ab1fa5e111ca492946",
+      "size": 2327
+    },
+    {
+      "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_note.txt",
+      "sha256": "a2d21a393418debe5d286b517b77fcabdce24b87b3bec3dbb2552a20f3ba5339",
+      "size": 58
+    },
+    {
+      "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_report.pdf",
+      "sha256": "454b9fe54a674e389dcd306fa055af908496e04818ea4301ae9d35eb0b6710ab",
+      "size": 824
+    }
+  ],
+  "counts": {
+    "extracted_text": 2,
+    "entities": 4,
+    "events": 2,
+    "transcriptions": 1
+  },
+  "sample_entities": [
+    {
+      "type": "DATE",
+      "text": "2024-05-08",
+      "provenance": {
+        "sha256": "48e23d516b60c2b9566bf6d76d3ca7e83ad1f22e2ad892ab1fa5e111ca492946",
+        "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_img.png",
+        "page": 1
+      }
+    },
+    {
+      "type": "ORG",
+      "text": "Alice",
+      "provenance": {
+        "sha256": "a2d21a393418debe5d286b517b77fcabdce24b87b3bec3dbb2552a20f3ba5339",
+        "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_note.txt",
+        "page": 1
+      }
+    },
+    {
+      "type": "ORG",
+      "text": "Acme Corp",
+      "provenance": {
+        "sha256": "a2d21a393418debe5d286b517b77fcabdce24b87b3bec3dbb2552a20f3ba5339",
+        "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_note.txt",
+        "page": 1
+      }
+    },
+    {
+      "type": "DATE",
+      "text": "2025-01-01",
+      "provenance": {
+        "sha256": "a2d21a393418debe5d286b517b77fcabdce24b87b3bec3dbb2552a20f3ba5339",
+        "path": "C:\\Projects\\FileAnalyzer\\smoke_evidence\\sample_note.txt",
+        "page": 1
+      }
+    }
+  ]
+}

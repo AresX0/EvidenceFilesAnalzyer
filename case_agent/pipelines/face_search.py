@@ -62,6 +62,40 @@ def _load_gallery_embeddings(gallery_dir: Path) -> dict:
     return embeddings
 
 
+def _load_labeled_gallery(labeled_dir: Path) -> dict:
+    """Load a labeled gallery (subfolders = subjects) and cache embeddings.
+
+    Returns a dict {subject: [{'path': str(path), 'embedding': list}]}.
+    """
+    labeled_dir = Path(labeled_dir)
+    cache = labeled_dir / ".labeled_face_cache.pkl"
+    if cache.exists():
+        try:
+            with cache.open('rb') as fh:
+                return pickle.load(fh)
+        except Exception:
+            logger.exception("Failed to load labeled gallery cache; will rebuild")
+    out = {}
+    for sub in sorted(labeled_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        items = []
+        for p in sub.rglob('*'):
+            if p.is_file() and p.suffix.lower() in {'.jpg', '.jpeg', '.png'}:
+                emb = _compute_embedding(p)
+                if emb is not None:
+                    items.append({'path': str(p), 'embedding': emb.tolist() if hasattr(emb, 'tolist') else list(emb)})
+        if items:
+            out[sub.name] = items
+    try:
+        labeled_dir.mkdir(parents=True, exist_ok=True)
+        with cache.open('wb') as fh:
+            pickle.dump(out, fh)
+    except Exception:
+        logger.exception("Failed to write labeled gallery cache")
+    return out
+
+
 def _align_face(pil_img, landmarks):
     """Align face to canonical orientation using eye positions from landmarks.
 
