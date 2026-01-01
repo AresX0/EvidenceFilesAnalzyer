@@ -508,7 +508,7 @@ def _persist_results(db_path: str | Path, res: dict, aggregate: bool = False):
     # Initialize DB and get session
     init_db(db_path)
     session = get_session()
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     source = res.get('source')
 
     # Labeled gallery format
