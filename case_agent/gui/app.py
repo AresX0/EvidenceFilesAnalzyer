@@ -55,6 +55,48 @@ def run_gui(report_path=REPORT):
     root.title('Case Agent — People Explorer')
     root.geometry('900x600')
 
+    # Menu: File -> Settings
+    menubar = tk.Menu(root)
+    file_menu = tk.Menu(menubar, tearoff=0)
+    def open_settings():
+        try:
+            s = tk.Toplevel(root)
+            s.title('Settings')
+            s.geometry('480x160')
+            ttk.Label(s, text='PDF Viewer Path (optional)').pack(anchor='w', padx=8, pady=(8,0))
+            pdf_var = tk.StringVar()
+            try:
+                import case_agent.config as cfg
+                pdf_var.set(str(getattr(cfg, 'PDF_VIEWER', '') or ''))
+            except Exception:
+                pdf_var.set('')
+            pdf_entry = ttk.Entry(s, textvariable=pdf_var)
+            pdf_entry.pack(fill='x', padx=8, pady=4)
+            btn_frame = ttk.Frame(s)
+            btn_frame.pack(fill='x', padx=8, pady=8)
+            def autodetect():
+                from case_agent.utils.viewers import detect_pdf_viewer
+                v = detect_pdf_viewer()
+                if v:
+                    pdf_var.set(str(v))
+            ttk.Button(btn_frame, text='Autodetect', command=autodetect).pack(side='left')
+            def save_settings():
+                try:
+                    import case_agent.config as cfg
+                    cfg.PDF_VIEWER = pdf_var.get() or None
+                    cfg.save_user_config()
+                    s.destroy()
+                except Exception:
+                    s.destroy()
+            ttk.Button(btn_frame, text='Save', command=save_settings).pack(side='right')
+        except Exception as e:
+            print('Settings dialog failed', e)
+    file_menu.add_command(label='Settings...', command=open_settings)
+    file_menu.add_separator()
+    file_menu.add_command(label='Quit', command=root.quit)
+    menubar.add_cascade(label='File', menu=file_menu)
+    root.config(menu=menubar)
+
     # Left panel (search + list)
     left = ttk.Frame(root, width=300)
     left.pack(side='left', fill='y')
@@ -263,131 +305,179 @@ def run_gui(report_path=REPORT):
         for r in rows:
             matches_lb.insert('end', f"{r[0]} ({r[1]})")
 
-    # Thumbs: use thumbnail util to generate cached thumbnails and show them
-    def show_thumbnails_for_person(person, batch=0, batch_size=40):
-        # Clear container only when requesting first batch
-        if batch == 0:
-            for child in thumbs_container.winfo_children():
-                child.destroy()
-            _tk_thumb_refs.clear()
-        files = person.get('files', [])
-        if not files:
-            return
-        from case_agent.utils.thumbs import thumbnail_for_image
-        from case_agent.utils.image_overlay import overlay_matches_on_pil
-        from PIL import Image, ImageTk
-        # show batch of thumbnails in a simple grid
-        cols = 4
-        start = batch * batch_size
-        end = min(len(files), start + batch_size)
-        for idx, fpath in enumerate(files[start:end], start=start):
-            try:
-                thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(160, 120))
-                img = Image.open(thumb_path).convert('RGB')
-                # overlay face matches on thumbnail if present
+    # Virtualized thumbnails: render only items in visible region
+    class VirtualThumbGrid:
+        def __init__(self, canvas, container, cols=4, thumb_size=(160,120), gap=(4,4)):
+            self.canvas = canvas
+            self.container = container
+            self.cols = cols
+            self.thumb_w, self.thumb_h = thumb_size
+            self.gx, self.gy = gap
+            self.rendered = {}  # idx -> widget
+            self.files = []
+            self.person = None
+            self.batch_size = 40
+
+        def set_person(self, person):
+            # reset state
+            self.person = person
+            self.files = person.get('files', []) if person else []
+            # clear existing widgets
+            for w in list(self.rendered.values()):
                 try:
-                    import sqlite3, json
-                    conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
-                    cur = conn.cursor()
-                    cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
-                    rows = cur.fetchall()
-                    conn.close()
-                    matches = []
-                    for r in rows:
-                        subj, pb = r[0], r[1]
-                        try:
-                            pbj = json.loads(pb) if pb else None
-                        except Exception:
-                            pbj = None
-                        matches.append({'subject': subj, 'probe_bbox': pbj})
-                    if matches:
-                        img = overlay_matches_on_pil(img, matches, size=img.size)
+                    w.destroy()
                 except Exception:
                     pass
-                tkimg = ImageTk.PhotoImage(img)
-            except Exception:
-                img = Image.new('RGB', (160, 120), color=(220, 220, 220))
-                tkimg = ImageTk.PhotoImage(img)
-            lbl = ttk.Label(thumbs_container, image=tkimg)
-            lbl.image = tkimg
-            # attach filepath for click handler
-            lbl.filepath = fpath
-            r = idx // cols
-            c = idx % cols
-            lbl.grid(row=r, column=c, padx=4, pady=4)
+            self.rendered.clear()
+            self.container.update_idletasks()
+            self._layout_placeholder()
+            self._on_scroll()
 
-            def on_click(ev, p=fpath):
-                # show full image in preview
+        def _layout_placeholder(self):
+            # set container grid rows to match count so scrollregion computed
+            n = len(self.files)
+            rows = (n + self.cols - 1) // self.cols
+            for r in range(rows):
+                # place empty frame placeholders
+                pass
+            self.container.update_idletasks()
+            self.canvas.configure(scrollregion=(0,0, self.cols*(self.thumb_w+self.gx), rows*(self.thumb_h+self.gy)))
+
+        def _visible_range(self):
+            y0, y1 = self.canvas.yview()
+            bbox = self.canvas.bbox('all') or (0,0,0,0)
+            total_h = bbox[3] - bbox[1] if bbox else 0
+            if total_h == 0:
+                return 0, -1
+            vy0 = int(y0 * total_h)
+            vy1 = int(y1 * total_h)
+            row0 = max(0, vy0 // (self.thumb_h + self.gy) - 1)
+            row1 = (vy1 // (self.thumb_h + self.gy)) + 1
+            start = row0 * self.cols
+            end = min(len(self.files), (row1+1) * self.cols)
+            return start, end
+
+        def _on_scroll(self, evt=None):
+            start, end = self._visible_range()
+            # remove widgets outside range
+            for idx in list(self.rendered.keys()):
+                if idx < start or idx >= end:
+                    try:
+                        self.rendered[idx].destroy()
+                    except Exception:
+                        pass
+                    del self.rendered[idx]
+            # render missing widgets
+            for idx in range(start, end):
+                if idx in self.rendered:
+                    continue
+                fpath = self.files[idx]
                 try:
-                    if p.lower().endswith('.pdf'):
-                        from case_agent.utils.image_overlay import render_pdf_first_page
-                        pil = render_pdf_first_page(p, size=(1000, 800))
-                    else:
-                        pil = Image.open(p).convert('RGB')
-                    # fetch matches and overlay
+                    from case_agent.utils.thumbs import thumbnail_for_image
+                    from case_agent.utils.image_overlay import overlay_matches_on_pil
+                    from PIL import Image, ImageTk
+                    thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(self.thumb_w, self.thumb_h))
+                    img = Image.open(thumb_path).convert('RGB')
+                    # overlay small match marker
                     try:
                         import sqlite3, json
                         conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
                         cur = conn.cursor()
-                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (p,))
+                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
                         rows = cur.fetchall()
                         conn.close()
                         matches = []
-                        for r0 in rows:
-                            subj, pb = r0[0], r0[1]
+                        for r in rows:
+                            subj, pb = r[0], r[1]
                             try:
                                 pbj = json.loads(pb) if pb else None
                             except Exception:
                                 pbj = None
                             matches.append({'subject': subj, 'probe_bbox': pbj})
                         if matches:
-                            from case_agent.utils.image_overlay import overlay_matches_on_pil
-                            pil = overlay_matches_on_pil(pil, matches, size=None)
+                            img = overlay_matches_on_pil(img, matches, size=img.size)
                     except Exception:
                         pass
-                    pil.thumbnail((1000, 800))
-                    tkp = ImageTk.PhotoImage(pil)
-                    preview.image = tkp
-                    preview.config(image=tkp, text='')
-                except Exception as e:
-                    preview.config(text=f'Cannot open: {p}\n{e}')
-            lbl.bind('<Button-1>', on_click)
-            # double-click open with configured PDF viewer when file is PDF, else system open
-            def on_double(ev, p=fpath):
-                if p.lower().endswith('.pdf'):
-                    # prefer configured viewer
-                    from case_agent import config as cfg
-                    viewer = getattr(cfg, 'PDF_VIEWER', None)
-                    if viewer:
+                    tkimg = ImageTk.PhotoImage(img)
+                except Exception:
+                    from PIL import Image, ImageTk
+                    img = Image.new('RGB', (self.thumb_w, self.thumb_h), color=(220,220,220))
+                    tkimg = ImageTk.PhotoImage(img)
+                lbl = ttk.Label(self.container, image=tkimg)
+                lbl.image = tkimg
+                lbl.filepath = fpath
+                r = idx // self.cols
+                c = idx % self.cols
+                lbl.grid(row=r, column=c, padx=self.gx, pady=self.gy)
+                def on_click(ev, p=fpath):
+                    # reuse existing on_click logic
+                    try:
+                        if p.lower().endswith('.pdf'):
+                            from case_agent.utils.image_overlay import render_pdf_first_page
+                            pil = render_pdf_first_page(p, size=(1000, 800))
+                        else:
+                            from PIL import Image
+                            pil = Image.open(p).convert('RGB')
+                        # overlay matches otherwise
                         try:
-                            import subprocess
-                            subprocess.Popen([viewer, p])
-                            return
+                            import sqlite3, json
+                            conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
+                            cur = conn.cursor()
+                            cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (p,))
+                            rows = cur.fetchall()
+                            conn.close()
+                            matches = []
+                            for r0 in rows:
+                                subj, pb = r0[0], r0[1]
+                                try:
+                                    pbj = json.loads(pb) if pb else None
+                                except Exception:
+                                    pbj = None
+                                matches.append({'subject': subj, 'probe_bbox': pbj})
+                            if matches:
+                                from case_agent.utils.image_overlay import overlay_matches_on_pil
+                                pil = overlay_matches_on_pil(pil, matches, size=None)
                         except Exception:
                             pass
-                __import__('os').startfile(p)
-            lbl.bind('<Double-1>', on_double)
+                        pil.thumbnail((1000, 800))
+                        from PIL import ImageTk
+                        tkp = ImageTk.PhotoImage(pil)
+                        preview.image = tkp
+                        preview.config(image=tkp, text='')
+                    except Exception as e:
+                        preview.config(text=f'Cannot open: {p}\n{e}')
+                lbl.bind('<Button-1>', on_click)
+                def on_double(ev, p=fpath):
+                    if p.lower().endswith('.pdf'):
+                        from case_agent.utils.viewers import detect_pdf_viewer
+                        from case_agent.config_defaults import PDF_VIEWER
+                        viewer = PDF_VIEWER or detect_pdf_viewer()
+                        if viewer:
+                            import subprocess
+                            subprocess.Popen([str(viewer), p])
+                            return
+                    __import__('os').startfile(p)
+                lbl.bind('<Double-1>', on_double)
+                def on_right(ev, p=fpath):
+                    menu = tk.Menu(root, tearoff=0)
+                    menu.add_command(label='Open file', command=lambda: on_double(None, p))
+                    menu.add_command(label='Reveal in Explorer', command=lambda: __import__('subprocess').run(['explorer', '/select,', p]))
+                    try:
+                        menu.tk_popup(ev.x_root, ev.y_root)
+                    finally:
+                        menu.grab_release()
+                lbl.bind('<Button-3>', on_right)
+                self.rendered[idx] = lbl
+            # update scrollregion just in case
+            self.container.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox('all'))
 
-            # right-click context menu
-            def on_right_click(ev, p=fpath):
-                menu = tk.Menu(root, tearoff=0)
-                menu.add_command(label='Open file', command=lambda: on_double(None, p))
-                menu.add_command(label='Reveal in Explorer', command=lambda: __import__('subprocess').run(['explorer', '/select,', p]))
-                try:
-                    menu.tk_popup(ev.x_root, ev.y_root)
-                finally:
-                    menu.grab_release()
-            lbl.bind('<Button-3>', on_right_click)
-            _tk_thumb_refs.append(tkimg)
-        # update scrollregion
-        canvas.update_idletasks()
-        canvas.configure(scrollregion=canvas.bbox('all'))
-        # if there are more batches, add a Load more button
-        total_batches = (len(files) + batch_size - 1) // batch_size
-        if batch + 1 < total_batches:
-            btn = ttk.Button(thumbs_container, text='Load more', command=lambda: show_thumbnails_for_person(person, batch=batch+1, batch_size=batch_size))
-            btn.grid(row=((end)//cols)+1, column=0, columnspan=cols, pady=6)
-            _tk_thumb_refs.append(btn)
+    # install virtualization handler
+    _virtual_grid = VirtualThumbGrid(canvas, thumbs_container, cols=4, thumb_size=(160,120))
+    canvas.bind('<Configure>', lambda e: _virtual_grid._on_scroll())
+    canvas.bind_all('<MouseWheel>', lambda e: (canvas.yview_scroll(int(-1*(e.delta/120)), 'units'), _virtual_grid._on_scroll()))
+    def show_thumbnails_for_person(person):
+        _virtual_grid.set_person(person)
 
 
     def show_gallery_for_selected_match(evt=None):
