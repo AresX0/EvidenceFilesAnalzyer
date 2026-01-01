@@ -58,6 +58,26 @@ def run_gui(report_path=REPORT):
 
     lb.bind('<<ListboxSelect>>', on_select)
 
+    def export_selected():
+        sel = lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        person = people[idx]
+        import csv
+        out = Path(r"C:/Projects/FileAnalyzer/reports")
+        out.mkdir(parents=True, exist_ok=True)
+        fname = out / f"people_{person.get('person').replace(' ', '_')}.csv"
+        with fname.open('w', newline='', encoding='utf-8') as fh:
+            w = csv.writer(fh)
+            w.writerow(['person', 'file'])
+            for f in person.get('files', []):
+                w.writerow([person.get('person'), f])
+        text.insert('end', f"\nExported to: {fname}\n")
+
+    btn = ttk.Button(left, text='Export person CSV', command=export_selected)
+    btn.pack(fill='x')
+
     root.mainloop()
 
 
