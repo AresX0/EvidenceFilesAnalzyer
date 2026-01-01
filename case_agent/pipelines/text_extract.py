@@ -35,11 +35,51 @@ def extract_text_from_pdf(path: Path) -> List[dict]:
     if PyPDF2 is None:
         logger.warning("PyPDF2 not available; skipping PDF text extraction for %s", path)
         return pages
-    with open(path, "rb") as fh:
-        reader = PyPDF2.PdfReader(fh)
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            pages.append({"page": i + 1, "text": text})
+    try:
+        with open(path, "rb") as fh:
+            reader = PyPDF2.PdfReader(fh)
+            for i, page in enumerate(reader.pages):
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    logger.exception('PyPDF2 failed extracting page %d of %s; will try fallback', i + 1, path)
+                    text = ''
+                pages.append({"page": i + 1, "text": text})
+    except Exception:
+        logger.exception('PyPDF2 failed to read %s; attempting PyMuPDF fallback', path)
+        # Attempt PyMuPDF (fitz) fallback if available
+        try:
+            import fitz
+            doc = fitz.open(str(path))
+            for i in range(len(doc)):
+                try:
+                    page = doc[i]
+                    text = page.get_text('text') or ''
+                except Exception:
+                    logger.exception('PyMuPDF failed to extract page %d for %s', i + 1, path)
+                    text = ''
+                pages.append({"page": i + 1, "text": text})
+        except Exception:
+            logger.exception('PyMuPDF fallback not available or failed for %s', path)
+    # As a last resort, if pages are empty and pytesseract is available, try rasterizing pages to images and OCR
+    if not any(p['text'] for p in pages):
+        try:
+            from PIL import Image
+            import fitz
+            doc = fitz.open(str(path))
+            for i in range(len(doc)):
+                try:
+                    page = doc[i]
+                    pix = page.get_pixmap(alpha=False)
+                    img = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+                    # OCR via pytesseract if available
+                    if pytesseract is not None:
+                        t = pytesseract.image_to_string(img)
+                        pages.append({"page": i + 1, "text": t})
+                except Exception:
+                    logger.exception('Failed raster/OCR page %d for %s', i + 1, path)
+        except Exception:
+            logger.debug('Raster/OCR fallback not available for %s', path)
     return pages
 
 
@@ -111,12 +151,21 @@ def extract_for_file(path: Path, db_path=None):
     except Exception:
         session.rollback()
 
+    def _sanitize_text(t: str) -> str:
+        if t is None:
+            return ''
+        try:
+            return t.encode('utf-8', 'replace').decode('utf-8')
+        except Exception:
+            return t
+
     for p in pages:
         try:
+            txt = _sanitize_text(p.get("text"))
             et = ExtractedText(
                 file_id=file_row.id,
                 page=p.get("page"),
-                text=p.get("text"),
+                text=txt,
                 provenance={"sha256": file_row.sha256, "path": file_row.path},
             )
             session.add(et)

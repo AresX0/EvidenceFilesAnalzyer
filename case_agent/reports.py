@@ -149,14 +149,23 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
 
     # Include face matches via SQLAlchemy model if available
     face_matches = []
+    face_matches_map = {}
+    top_subjects = []
     try:
         from .db.models import FaceMatch
         # Ensure DB initialized
         init_db(db_path)
         session = get_session()
-        for fm in session.query(FaceMatch).order_by(FaceMatch.created_at.desc()).limit(1000).all():
+        for fm in session.query(FaceMatch).order_by(FaceMatch.created_at.desc()).limit(5000).all():
             created = fm.created_at.isoformat() if hasattr(fm.created_at, 'isoformat') else fm.created_at
-            face_matches.append({'source': fm.source, 'probe_bbox': fm.probe_bbox, 'subject': fm.subject, 'gallery_path': fm.gallery_path, 'distance': fm.distance, 'created_at': created})
+            rec = {'source': fm.source, 'probe_bbox': fm.probe_bbox, 'subject': fm.subject, 'gallery_path': fm.gallery_path, 'distance': fm.distance, 'created_at': created}
+            face_matches.append(rec)
+            # populate map
+            face_matches_map.setdefault(fm.source, []).append({'subject': fm.subject, 'probe_bbox': fm.probe_bbox})
+        # compute top subjects by frequency
+        from collections import Counter
+        subj_counts = Counter([r['subject'] for r in face_matches if r.get('subject')])
+        top_subjects = [{'subject': s, 'count': c} for s, c in subj_counts.most_common(20)]
     except Exception:
         # Non-fatal: report without face matches
         pass
@@ -231,6 +240,8 @@ def generate_extended_report(db_path: str | Path, excerpt_chars: int = 200, max_
         "people": people,
         "pdf_synopses": pdf_synopses,
         "face_matches": face_matches,
+        "face_matches_map": face_matches_map,
+        "top_subjects": top_subjects,
     }
     return report
 
@@ -289,6 +300,16 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         for k, v in report.get('counts', {}).items():
             fh.write(f'<li><strong>{k}</strong>: {v}</li>')
         fh.write('</ul>')
+
+        fh.write('<h2>Top Subjects</h2>')
+        fh.write('<table border="1"><tr><th>Subject</th><th>Count</th></tr>')
+        for s in report.get('top_subjects', []):
+            # link to person page if exists
+            subj = s.get('subject')
+            safe_name = ''.join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in str(subj)]).replace(' ', '_')
+            person_page = f"people/{safe_name}.html"
+            fh.write(f"<tr><td><a href=\"{person_page}\">{subj}</a></td><td>{s.get('count')}</td></tr>")
+        fh.write('</table>')
 
         fh.write('<h2>Top Entities</h2>')
         fh.write('<table border="1"><tr><th>Type</th><th>Text</th><th>Count</th></tr>')
@@ -388,30 +409,41 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
                     # create a thumbnail and overlay matches if present
                     tpath = thumbnail_for_image(fpath, reports_dir, size=(400, 300))
                     overlay_path = None
+                    matches = []
+                    # prefer face_matches_map from report if available (faster)
                     try:
-                        import sqlite3, json
-                        conn = sqlite3.connect(str(Path(reports_dir).parent / 'file_analyzer.db'))
-                        cur = conn.cursor()
-                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
-                        rows = cur.fetchall()
-                        conn.close()
+                        fmap = report.get('face_matches_map') or {}
+                        matches = fmap.get(fpath, []) or []
+                    except Exception:
                         matches = []
-                        for r in rows:
-                            subj, pb = r[0], r[1]
-                            try:
-                                pbj = json.loads(pb) if pb else None
-                            except Exception:
-                                pbj = None
-                            matches.append({'subject': subj, 'probe_bbox': pbj})
-                        if matches:
+                    if not matches:
+                        # fallback to DB query
+                        try:
+                            import sqlite3, json
+                            conn = sqlite3.connect(str(Path(reports_dir).parent / 'file_analyzer.db'))
+                            cur = conn.cursor()
+                            cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
+                            rows = cur.fetchall()
+                            conn.close()
+                            for r in rows:
+                                subj, pb = r[0], r[1]
+                                try:
+                                    pbj = json.loads(pb) if pb else None
+                                except Exception:
+                                    pbj = None
+                                matches.append({'subject': subj, 'probe_bbox': pbj})
+                        except Exception:
+                            matches = []
+                    if matches:
+                        try:
                             from .utils.image_overlay import overlay_matches_on_pil
                             from PIL import Image
                             img = Image.open(tpath).convert('RGB')
                             img = overlay_matches_on_pil(img, matches, size=img.size)
                             overlay_path = Path(reports_dir) / ('overlay_' + Path(tpath).name)
                             img.save(overlay_path, format='JPEG', quality=85)
-                    except Exception:
-                        overlay_path = None
+                        except Exception:
+                            overlay_path = None
                     rel = Path('thumbnails') / Path(tpath).name
                     ph.write('<li>')
                     if overlay_path:

@@ -47,6 +47,15 @@ def thumbnail_for_image(image_path: str, out_dir: str | Path, size=(160, 160)) -
     if out_path.exists():
         return out_path
     try:
+        # Support PDF thumbnails via PyMuPDF if available
+        if image_path.suffix.lower() == '.pdf':
+            try:
+                from .image_overlay import render_pdf_first_page
+                pil = render_pdf_first_page(image_path, size=size)
+                pil.save(out_path, format='JPEG', quality=85)
+                return out_path
+            except Exception:
+                pass
         img = Image.open(image_path)
         img = img.convert('RGB')
         img.thumbnail(size)

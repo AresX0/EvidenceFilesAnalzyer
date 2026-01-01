@@ -72,6 +72,14 @@ def run_gui(report_path=REPORT):
                 pdf_var.set('')
             pdf_entry = ttk.Entry(s, textvariable=pdf_var)
             pdf_entry.pack(fill='x', padx=8, pady=4)
+            # Show top subjects option
+            subjects_var = tk.BooleanVar(value=True)
+            try:
+                import case_agent.config as cfg
+                subjects_var.set(bool(getattr(cfg, 'SHOW_TOP_SUBJECTS', True)))
+            except Exception:
+                subjects_var.set(True)
+            ttk.Checkbutton(s, text='Show top subjects panel', variable=subjects_var).pack(anchor='w', padx=8, pady=(4,4))
             btn_frame = ttk.Frame(s)
             btn_frame.pack(fill='x', padx=8, pady=8)
             def autodetect():
@@ -84,6 +92,7 @@ def run_gui(report_path=REPORT):
                 try:
                     import case_agent.config as cfg
                     cfg.PDF_VIEWER = pdf_var.get() or None
+                    cfg.SHOW_TOP_SUBJECTS = bool(subjects_var.get())
                     cfg.save_user_config()
                     s.destroy()
                 except Exception:
@@ -221,6 +230,17 @@ def run_gui(report_path=REPORT):
     matches_lb = tk.Listbox(top_frame, height=6)
     matches_lb.pack(side='left', fill='y')
 
+    # Top subjects panel (configurable)
+    # will be populated from report's 'top_subjects' or from face_matches list
+    top_subjects_frame = ttk.Frame(top_frame)
+    top_subjects_frame.pack(side='left', padx=(10,0))
+    top_subjects_label = ttk.Label(top_subjects_frame, text='Top subjects:')
+    top_subjects_label.pack(anchor='w')
+    top_subjects_list = tk.Listbox(top_subjects_frame, height=6)
+    top_subjects_list.pack(fill='y')
+    # Expose for tests
+    root.top_subjects_frame = top_subjects_frame
+
     # Documents list for selected person (double-click to open)
     docs_label = ttk.Label(top_frame, text='Documents')
     docs_label.pack(side='left', padx=(10,0))
@@ -240,6 +260,12 @@ def run_gui(report_path=REPORT):
     mic_btn.pack(side='left', padx=(4,0))
 
     # Try to enable mic button if speech_recognition available and microphone present
+    try:
+        import case_agent.config as cfg
+        SHOW_TOP = bool(getattr(cfg, 'SHOW_TOP_SUBJECTS', True))
+    except Exception:
+        SHOW_TOP = True
+
     try:
         import speech_recognition as sr
         # naive check for mic devices
@@ -269,6 +295,26 @@ def run_gui(report_path=REPORT):
             mic_btn.config(command=on_mic_click)
     except Exception:
         pass
+
+    # populate top subjects list from report if enabled
+    def _load_top_subjects():
+        top_subjects_list.delete(0, 'end')
+        try:
+            # prefer precomputed top_subjects
+            ts = rpt.get('top_subjects') or []
+            if not ts and rpt.get('face_matches'):
+                from collections import Counter
+                subj_counts = Counter([r.get('subject') for r in rpt.get('face_matches', []) if r.get('subject')])
+                ts = [{'subject': s, 'count': c} for s, c in subj_counts.most_common(20)]
+            for s in ts[:20]:
+                top_subjects_list.insert('end', f"{s.get('subject')} ({s.get('count')})")
+        except Exception:
+            pass
+
+    if SHOW_TOP:
+        _load_top_subjects()
+    else:
+        top_subjects_frame.pack_forget()
     # Thumbnail gallery area with a canvas + scrollbar
     gallery_frame = ttk.Frame(right)
     gallery_frame.pack(fill='both', expand=True)
@@ -317,6 +363,14 @@ def run_gui(report_path=REPORT):
             self.files = []
             self.person = None
             self.batch_size = 40
+            # executor for background thumbnail generation
+            from concurrent.futures import ThreadPoolExecutor
+            self._executor = ThreadPoolExecutor(max_workers=4)
+            self._futures = {}  # idx -> future
+            # debounce handle for scroll events
+            self._scheduled_id = None
+            # throttle small initial batch to make UI responsive
+            self._initial_load = True
 
         def set_person(self, person):
             # reset state
@@ -329,6 +383,13 @@ def run_gui(report_path=REPORT):
                 except Exception:
                     pass
             self.rendered.clear()
+            # cancel outstanding futures
+            for f in list(self._futures.values()):
+                try:
+                    f.cancel()
+                except Exception:
+                    pass
+            self._futures.clear()
             self.container.update_idletasks()
             self._layout_placeholder()
             self._on_scroll()
@@ -337,9 +398,6 @@ def run_gui(report_path=REPORT):
             # set container grid rows to match count so scrollregion computed
             n = len(self.files)
             rows = (n + self.cols - 1) // self.cols
-            for r in range(rows):
-                # place empty frame placeholders
-                pass
             self.container.update_idletasks()
             self.canvas.configure(scrollregion=(0,0, self.cols*(self.thumb_w+self.gx), rows*(self.thumb_h+self.gy)))
 
@@ -358,6 +416,16 @@ def run_gui(report_path=REPORT):
             return start, end
 
         def _on_scroll(self, evt=None):
+            # debounce rapid scroll events to avoid excessive work
+            try:
+                if self._scheduled_id:
+                    root.after_cancel(self._scheduled_id)
+            except Exception:
+                pass
+            self._scheduled_id = root.after(100, self._do_on_scroll)
+
+        def _do_on_scroll(self):
+            self._scheduled_id = None
             start, end = self._visible_range()
             # remove widgets outside range
             for idx in list(self.rendered.keys()):
@@ -372,105 +440,77 @@ def run_gui(report_path=REPORT):
                 if idx in self.rendered:
                     continue
                 fpath = self.files[idx]
-                try:
-                    from case_agent.utils.thumbs import thumbnail_for_image
-                    from case_agent.utils.image_overlay import overlay_matches_on_pil
-                    from PIL import Image, ImageTk
-                    thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(self.thumb_w, self.thumb_h))
-                    img = Image.open(thumb_path).convert('RGB')
-                    # overlay small match marker
-                    try:
-                        import sqlite3, json
-                        conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
-                        cur = conn.cursor()
-                        cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
-                        rows = cur.fetchall()
-                        conn.close()
-                        matches = []
-                        for r in rows:
-                            subj, pb = r[0], r[1]
-                            try:
-                                pbj = json.loads(pb) if pb else None
-                            except Exception:
-                                pbj = None
-                            matches.append({'subject': subj, 'probe_bbox': pbj})
-                        if matches:
-                            img = overlay_matches_on_pil(img, matches, size=img.size)
-                    except Exception:
-                        pass
-                    tkimg = ImageTk.PhotoImage(img)
-                except Exception:
-                    from PIL import Image, ImageTk
-                    img = Image.new('RGB', (self.thumb_w, self.thumb_h), color=(220,220,220))
-                    tkimg = ImageTk.PhotoImage(img)
-                lbl = ttk.Label(self.container, image=tkimg)
-                lbl.image = tkimg
-                lbl.filepath = fpath
+                # create placeholder
+                from PIL import Image, ImageTk
+                placeholder = Image.new('RGB', (self.thumb_w, self.thumb_h), color=(240,240,240))
+                ph_img = ImageTk.PhotoImage(placeholder)
+                lbl = ttk.Label(self.container, image=ph_img, text='Loading...', compound='center')
+                lbl.image = ph_img
                 r = idx // self.cols
                 c = idx % self.cols
                 lbl.grid(row=r, column=c, padx=self.gx, pady=self.gy)
-                def on_click(ev, p=fpath):
-                    # reuse existing on_click logic
-                    try:
-                        if p.lower().endswith('.pdf'):
-                            from case_agent.utils.image_overlay import render_pdf_first_page
-                            pil = render_pdf_first_page(p, size=(1000, 800))
-                        else:
-                            from PIL import Image
-                            pil = Image.open(p).convert('RGB')
-                        # overlay matches otherwise
-                        try:
-                            import sqlite3, json
-                            conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
-                            cur = conn.cursor()
-                            cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (p,))
-                            rows = cur.fetchall()
-                            conn.close()
-                            matches = []
-                            for r0 in rows:
-                                subj, pb = r0[0], r0[1]
-                                try:
-                                    pbj = json.loads(pb) if pb else None
-                                except Exception:
-                                    pbj = None
-                                matches.append({'subject': subj, 'probe_bbox': pbj})
-                            if matches:
-                                from case_agent.utils.image_overlay import overlay_matches_on_pil
-                                pil = overlay_matches_on_pil(pil, matches, size=None)
-                        except Exception:
-                            pass
-                        pil.thumbnail((1000, 800))
-                        from PIL import ImageTk
-                        tkp = ImageTk.PhotoImage(pil)
-                        preview.image = tkp
-                        preview.config(image=tkp, text='')
-                    except Exception as e:
-                        preview.config(text=f'Cannot open: {p}\n{e}')
-                lbl.bind('<Button-1>', on_click)
-                def on_double(ev, p=fpath):
-                    if p.lower().endswith('.pdf'):
-                        from case_agent.utils.viewers import detect_pdf_viewer
-                        from case_agent.config_defaults import PDF_VIEWER
-                        viewer = PDF_VIEWER or detect_pdf_viewer()
-                        if viewer:
-                            import subprocess
-                            subprocess.Popen([str(viewer), p])
-                            return
-                    __import__('os').startfile(p)
-                lbl.bind('<Double-1>', on_double)
-                def on_right(ev, p=fpath):
-                    menu = tk.Menu(root, tearoff=0)
-                    menu.add_command(label='Open file', command=lambda: on_double(None, p))
-                    menu.add_command(label='Reveal in Explorer', command=lambda: __import__('subprocess').run(['explorer', '/select,', p]))
-                    try:
-                        menu.tk_popup(ev.x_root, ev.y_root)
-                    finally:
-                        menu.grab_release()
-                lbl.bind('<Button-3>', on_right)
                 self.rendered[idx] = lbl
+                # schedule background render
+                if idx not in self._futures:
+                    fut = self._executor.submit(self._render_thumb, idx, fpath)
+                    # schedule main-thread UI update on completion
+                    fut.add_done_callback(lambda fut, ix=idx, s=self: root.after(0, lambda: s._apply_rendered(ix, fut.result())))
+                    self._futures[idx] = fut
             # update scrollregion just in case
             self.container.update_idletasks()
             self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+        def _render_thumb(self, idx, fpath):
+            # runs in worker thread: prepare PIL.Image
+            try:
+                from case_agent.utils.thumbs import thumbnail_for_image
+                from case_agent.utils.image_overlay import overlay_matches_on_pil
+                from PIL import Image
+                thumb_path = thumbnail_for_image(fpath, Path(r"C:/Projects/FileAnalyzer/reports"), size=(self.thumb_w, self.thumb_h))
+                img = Image.open(thumb_path).convert('RGB')
+                # overlay small match marker
+                try:
+                    import sqlite3, json
+                    conn = sqlite3.connect(r'C:/Projects/FileAnalyzer/file_analyzer.db')
+                    cur = conn.cursor()
+                    cur.execute("SELECT subject, probe_bbox FROM face_matches WHERE source=?", (fpath,))
+                    rows = cur.fetchall()
+                    conn.close()
+                    matches = []
+                    for r in rows:
+                        subj, pb = r[0], r[1]
+                        try:
+                            pbj = json.loads(pb) if pb else None
+                        except Exception:
+                            pbj = None
+                        matches.append({'subject': subj, 'probe_bbox': pbj})
+                    if matches:
+                        img = overlay_matches_on_pil(img, matches, size=img.size)
+                except Exception:
+                    pass
+                return img
+            except Exception:
+                from PIL import Image
+                return Image.new('RGB', (self.thumb_w, self.thumb_h), color=(220,220,220))
+
+        def _apply_rendered(self, idx, pil_img):
+            # must run in main thread to create PhotoImage
+            try:
+                from PIL import ImageTk
+                if idx not in self.rendered:
+                    return
+                tkimg = ImageTk.PhotoImage(pil_img)
+                lbl = self.rendered[idx]
+                lbl.config(image=tkimg)
+                lbl.image = tkimg
+            except Exception:
+                pass
+
+        def shutdown(self):
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
 
     # install virtualization handler
     _virtual_grid = VirtualThumbGrid(canvas, thumbs_container, cols=4, thumb_size=(160,120))

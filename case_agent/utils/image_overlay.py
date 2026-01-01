@@ -56,7 +56,18 @@ def overlay_matches_on_pil(img: Image.Image, matches: list, size: tuple | None =
         name = m.get('subject') or ''
         if name:
             text = str(name)
-            text_w, text_h = draw.textsize(text, font=font)
+            # text size - use font.getsize when available, fallback to textbbox
+            try:
+                if font is not None:
+                    text_w, text_h = font.getsize(text)
+                else:
+                    text_w, text_h = draw.textsize(text)
+            except Exception:
+                try:
+                    bbox = draw.textbbox((0,0), text, font=font)
+                    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except Exception:
+                    text_w, text_h = (50, 10)
             # filled rectangle behind text
             draw.rectangle([l, t - text_h - 4, l + text_w + 6, t], fill='lime')
             draw.text((l + 3, t - text_h - 2), text, fill='black', font=font)
