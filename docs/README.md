@@ -35,5 +35,18 @@ FileAnalyzer is a forensic-style toolkit focused on extracting, analyzing, and r
 3. Run `python -c "from case_agent.gui.app import run_gui; run_gui()"` to open GUI (if available).
 4. Inspect `scripts/run_full_scan.py` for an example pipeline invocation.
 
+## Agent API & People Report
+
+- Run a lightweight HTTP server exposing the local agent and reports:
+  - `python -m case_agent.cli serve --host 127.0.0.1 --port 5000 --db ./file_analyzer.db`
+  - Endpoints:
+    - `GET /agent/find?query=...` — search extracted text for mentions
+    - `GET /agent/query?query=...` — structured deterministic answer with facts/provenance
+    - `GET /agent/synopsis` — case-level synopsis (uses Ollama if available)
+    - `GET /reports/people` — returns aggregated people mention report
+
+- Export a people-mention report from the CLI:
+  - `python -m case_agent.cli people-report --db ./file_analyzer.db --out people.json --format json`
+
 ## Docs & Next Steps
 See `docs/ARCHITECTURE.md`, `docs/DIAGRAMS/` and the project `MANIFEST.md` for deeper information and current TODOs.

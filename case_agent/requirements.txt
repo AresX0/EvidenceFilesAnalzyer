@@ -4,6 +4,7 @@ python-docx
 pillow
 pytesseract
 spacy
+flask
 # Optional heavy deps (not required to run core inventory):
 # whisper
 # ffmpeg needs to be installed on the system path

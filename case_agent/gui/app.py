@@ -6,7 +6,11 @@ Tkinter window listing people and files.
 
 from pathlib import Path
 
-from case_agent.gui.virtual_grid import VirtualThumbGrid
+# Expose the headless model here for tests: `from case_agent.gui.app import VirtualThumbGridModel`
+from case_agent.gui.virtual_grid import (  # noqa: F401
+    VirtualThumbGrid,
+    VirtualThumbGridModel,
+)
 
 REPORT = Path("reports/epstein_face_report.json")
 

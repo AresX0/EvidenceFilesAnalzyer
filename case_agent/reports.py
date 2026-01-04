@@ -22,7 +22,11 @@ def generate_extended_report(
       - events and timeline summary (earliest/latest)
       - basic issues (files with no extracted text, PDFs without text, media without transcription)
     """
-    init_db(db_path)
+    # Initialize DB (use default if db_path is None)
+    if db_path is not None:
+        init_db(db_path)
+    else:
+        init_db()
     session = get_session()
 
     files = [

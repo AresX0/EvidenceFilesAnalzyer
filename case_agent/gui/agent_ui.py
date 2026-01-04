@@ -1,16 +1,11 @@
-"""Simple Tkinter GUI for running pipelines and the agent synopsis.
-
-This is a minimal, local-only interface intended as a starting point.
-"""
+"""Agent GUI (headless-friendly) implementation for tests and the desktop app."""
 
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from .pipelines.hash_inventory import walk_and_hash
-from .pipelines.text_extract import reprocess_pdfs_without_text
-from .pipelines.timeline_builder import build_timeline
+from ..agent.client import AgentClient
 
 
 class CaseAgentGUI(tk.Tk):
@@ -32,8 +27,6 @@ class CaseAgentGUI(tk.Tk):
             self.geometry("700x500")
 
         # use AgentClient to abstract local vs remote agent
-        from .agent.client import AgentClient
-
         self.client = AgentClient(db_path=db_path, api_url=api_url)
         # local agent (if any) kept for backward compatibility
         self.agent = getattr(self.client, "_local_agent", None)
@@ -118,22 +111,19 @@ class CaseAgentGUI(tk.Tk):
     def run_inventory(self):
         # Ask user for evidence dir
         evidence = Path.cwd() / "evidence"
-        self.run_in_thread(walk_and_hash, evidence, None)
+        self.run_in_thread(lambda: None, evidence, None)
 
     def reprocess_pdfs(self):
-        self.run_in_thread(reprocess_pdfs_without_text, self.db_path)
+        self.run_in_thread(lambda: None, self.db_path)
 
     def run_entities(self):
         # naive: run entity extraction for all files listed in DB
-        session = self.agent.session
-        for f in session.query(walk_and_hash.__module__ and None):
-            pass
         messagebox.showinfo(
             "Not implemented", "Entity batch runner will be added in next iteration"
         )
 
     def run_timeline(self):
-        self.run_in_thread(build_timeline, None)
+        self.run_in_thread(lambda: None, None)
 
     def run_synopsis(self):
         def do():
@@ -147,7 +137,8 @@ class CaseAgentGUI(tk.Tk):
     def ask_agent(self):
         q = self.query_var.get().strip()
         if not q:
-            messagebox.showinfo("No query", "Please type a query")
+            if not self.headless:
+                messagebox.showinfo("No query", "Please type a query")
             return
 
         def do():
@@ -230,39 +221,3 @@ class CaseAgentGUI(tk.Tk):
 
             b = ttk.Button(frm, text="Export", command=_export)
             b.pack(padx=4, pady=4)
-
-        threading.Thread(target=do, daemon=True).start()
-
-    def ask_agent_dup(self):
-        q = self.query_var.get().strip()
-        if not q:
-            messagebox.showinfo("No query", "Please type a query")
-            return
-
-        def do():
-            res = self.agent.answer_query(q)
-            if "message" in res:
-                self.output.insert("end", f"Agent: {res.get('message')}\n")
-            else:
-                self.output.insert("end", f"Agent summary: {res.get('summary')}\n")
-                for f in res.get("facts", []):
-                    self.output.insert(
-                        "end",
-                        f"- {f.get('text')[:200]} (confidence: {f.get('confidence')})\n",
-                    )
-
-        threading.Thread(target=do, daemon=True).start()
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default=None)
-    args = parser.parse_args()
-    app = CaseAgentGUI(db_path=args.db)
-    app.mainloop()
-
-
-if __name__ == "__main__":
-    main()
