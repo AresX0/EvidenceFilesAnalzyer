@@ -501,6 +501,8 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
             safe_name = "".join(
                 [c if c.isalnum() or c in (" ", "-", "_") else "_" for c in str(subj)]
             ).replace(" ", "_")
+            # Truncate to avoid Windows MAX_PATH / invalid filename issues
+            safe_name = safe_name[:120]
             person_page = f"people/{safe_name}.html"
             fh.write(
                 f"<tr><td><a href=\"{person_page}\">{subj}</a></td><td>{s.get('count')}</td></tr>"
@@ -545,6 +547,8 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
             safe_name = "".join(
                 [c if c.isalnum() or c in (" ", "-", "_") else "_" for c in name]
             ).replace(" ", "_")
+            # Truncate to avoid Windows MAX_PATH / invalid filename issues
+            safe_name = safe_name[:120]
             person_page = f"people/{safe_name}.html"
             # prepare thumbnails for first few image files
             thumbs_html = []
@@ -615,6 +619,8 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
             safe_name = "".join(
                 [c if c.isalnum() or c in (" ", "-", "_") else "_" for c in name]
             ).replace(" ", "_")
+            # Truncate to avoid Windows MAX_PATH / invalid filename issues
+            safe_name = safe_name[:120]
             person_page = f"people/{safe_name}.html"
             docs_html = []
             doc_count = 0
@@ -712,6 +718,8 @@ def write_report_html(report: Dict[str, Any], path: str | Path):
         safe_name = "".join(
             [c if c.isalnum() or c in (" ", "-", "_") else "_" for c in name]
         ).replace(" ", "_")
+        # Truncate to avoid Windows MAX_PATH / invalid filename issues
+        safe_name = safe_name[:120]
         person_page_path = people_dir / f"{safe_name}.html"
 
         # Gather thumbnails and overlay tasks for this person
